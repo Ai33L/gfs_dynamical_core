@@ -14,7 +14,7 @@
 
 ## Features
 
--   TODO
+-   Does nothing ;)
 
 ## Credits
 
