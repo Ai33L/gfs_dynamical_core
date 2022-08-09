@@ -15,7 +15,7 @@
 ## Features
 
 -   Does nothing ;)
--   , actually not
+-   , actually not yet
 
 ## Credits
 
