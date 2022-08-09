@@ -1,30 +1,57 @@
-# !/usr/bin/env python
+#!/usr/bin/env python
 
-from distutils.core import setup
+"""The setup script."""
+
+import io
+from os import path as op
+from setuptools import setup, find_packages
+
+with open('README.md') as readme_file:
+    readme = readme_file.read()
+
+here = op.abspath(op.dirname(__file__))
+
+# get the dependencies and installs
+with io.open(op.join(here, "requirements.txt"), encoding="utf-8") as f:
+    all_reqs = f.read().split("\n")
+
+install_requires = [x.strip() for x in all_reqs if "git+" not in x]
+dependency_links = [x.strip().replace("git+", "") for x in all_reqs if "git+" not in x]
+
+requirements = [ ]
+
+setup_requirements = [ ]
+
+test_requirements = [ ]
+
 setup(
-    name='cookiecutter-pypackage',
-    packages=[],
-    version='0.1.0',
-    description='Cookiecutter template for a Python package',
-    author='Audrey Roy Greenfeld',
-    license='BSD',
-    author_email='aroy@alum.mit.edu',
-    url='https://github.com/audreyr/cookiecutter-pypackage',
-    keywords=['cookiecutter', 'template', 'package', ],
-    python_requires='>=3.6',
+    author="Abel Shibu",
+    author_email='abels2000@gmail.com',
+    python_requires='>=3.7',
     classifiers=[
-        'Development Status :: 4 - Beta',
-        'Environment :: Console',
+        'Development Status :: 2 - Pre-Alpha',
         'Intended Audience :: Developers',
-        'Natural Language :: English',
         'License :: OSI Approved :: BSD License',
-        'Programming Language :: Python',
+        'Natural Language :: English',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.6',
         'Programming Language :: Python :: 3.7',
         'Programming Language :: Python :: 3.8',
-        'Programming Language :: Python :: Implementation :: CPython',
-        'Programming Language :: Python :: Implementation :: PyPy',
-        'Topic :: Software Development',
+        'Programming Language :: Python :: 3.9',
     ],
+    description="Only the dynamical core of the climt repository",
+    install_requires=install_requires,
+    dependency_links=dependency_links,
+    license="BSD license",
+    long_description=readme,
+    long_description_content_type='text/markdown',
+    include_package_data=True,
+    keywords='climt_core',
+    name='climt_core',
+    packages=find_packages(include=['climt_core', 'climt_core.*']),
+    setup_requires=setup_requirements,
+    test_suite='tests',
+    tests_require=test_requirements,
+    url='https://github.com/Ai33L/climt_core',
+    version='0.0.1',
+    zip_safe=False,
 )
