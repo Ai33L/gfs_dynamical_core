@@ -15,6 +15,7 @@
 ## Features
 
 -   Does nothing ;)
+-   , actually not yet
 
 ## Credits
 
