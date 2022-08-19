@@ -1,4 +1,4 @@
-# climt_core
+# gfs_dynamical_core
 
 
 [![image](https://img.shields.io/pypi/v/climt_core.svg)](https://pypi.python.org/pypi/climt_core)
