@@ -9,8 +9,7 @@
 
 
 -   Free software: BSD license
--   Documentation: https://Ai33L.github.io/climt_core
-    
+-   Documentation: https://ai33l.github.io/gfs_dynamical_core/
 
 ## Features
 
