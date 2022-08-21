@@ -84,7 +84,7 @@ compiled_base_dir = 'gfs_dynamical_core/_lib'
 
 if operating_system == 'Linux':
     libraries = ['m', 'gfortran', 'rt']
-    default_link_args = ['-lgfortran']
+    default_link_args = ['-lgfortran','-lm','-lopenblas']
 
 if operating_system == 'Windows':
     compiled_base_dir = 'gfs_dynamical_core\\_lib'

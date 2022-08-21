@@ -30,7 +30,7 @@ ifeq ($(CLIMT_ARCH),Windows)
 endif
 
 
-all: $(CLIMT_LIB_TARGETS) sht_lib gfs_lib simple_physics_lib emanuel_lib rrtmg_lw_lib rrtmg_sw_lib libdcmip
+all: $(CLIMT_LIB_TARGETS) sht_lib gfs_lib
 
 # FFTW3 Configuration
 
