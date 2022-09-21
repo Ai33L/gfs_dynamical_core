@@ -17,6 +17,7 @@ jobs:
         os: [ubuntu-18.04, macos-10.15]
         python-version: [py37, py38, py39]
     steps:
+    - uses: actions/checkout@v2
     - name: Set up Python 37
       if: ${{ matrix.python-version == 'py37' }}
       uses: actions/setup-python@v2
@@ -37,11 +38,10 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         python -m pip install wheel tox
-        pip install -r requirements_dev.txt
+        if [ -f requirements_dev.txt ]; then pip install -r requirements_dev.txt; fi
     - name: Lint with flake8
       run: |
         # stop the build if there are Python syntax errors or undefined names
-        pip install flake8
         flake8 gfs_dynamical_core/ --count --show-source --statistics
     - name: Build gfs_dynamical_core
       run: |
