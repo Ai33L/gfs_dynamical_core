@@ -30,11 +30,11 @@ except ImportError:
 
 include_dirs = [np.get_include()]
 
-with open('README.rst') as readme_file:
-    readme = readme_file.read()
+# with open('README.rst') as readme_file:
+#     readme = readme_file.read()
 
-with open('HISTORY.rst') as history_file:
-    history = history_file.read()
+# with open('HISTORY.rst') as history_file:
+#     history = history_file.read()
 
 requirements = [
     'numpy>=1.16.0',
@@ -201,11 +201,11 @@ ext_modules = [
 setup(
     name='gfs_dynamical_core',
     version='0.16.14',
-    description='to be added',
-    long_description=readme + '\n\n' + history,
+    description='Only the dynamical core of the climt repository',
+    long_description='',
     author="Rodrigo Caballero",
     author_email='rodrigo.caballero@misu.su.se',
-    url='to be added',
+    url='https://github.com/Ai33L/gfs_dynamical_core.git',
     packages=[
         'gfs_dynamical_core',
     ],
