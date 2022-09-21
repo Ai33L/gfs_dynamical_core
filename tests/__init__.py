@@ -1,1 +1,1 @@
-"""Unit test package for climt_core."""
+# -*- coding: utf-8 -*-
