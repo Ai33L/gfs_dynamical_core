@@ -85,6 +85,7 @@ domain_shape_descriptor = {
     'scalar': get_scalar_grid,
 }
 
+
 class ConstantDefaultValue(DiagnosticComponent):
 
     input_properties = {}
