@@ -16,6 +16,6 @@ __all__ = (
     get_default_state, get_grid, mass_to_volume_mixing_ratio, numpy_version_of,
     get_interface_values, list_available_constants,
     set_constants_from_dict,
-    bolton_q_sat, bolton_dqsat_dT, calculate_q_sat,GFSDynamicalCore)
+    bolton_q_sat, bolton_dqsat_dT, calculate_q_sat, GFSDynamicalCore)
 
 __version__ = '0.16.14'
