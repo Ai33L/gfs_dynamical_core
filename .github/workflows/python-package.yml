@@ -17,7 +17,7 @@ jobs:
         # os: [ubuntu-18.04, macos-10.15]
         os: [ubuntu-18.04]
         # python-version: [py37, py38, py39]
-        python-version: [py37]
+        python-version: [py37, py38]
     steps:
     - uses: actions/checkout@v2
     - name: Set up Python 37
@@ -25,11 +25,11 @@ jobs:
       uses: actions/setup-python@v2
       with:
         python-version: 3.7
-    # - name: Set up Python 38
-    #   if: ${{ matrix.python-version == 'py38' }}
-    #   uses: actions/setup-python@v2
-    #   with:
-    #     python-version: 3.8
+    - name: Set up Python 38
+      if: ${{ matrix.python-version == 'py38' }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: 3.8
     # - name: Set up Python 39
     #   if: ${{ matrix.python-version == 'py39' }}
     #   uses: actions/setup-python@v2
