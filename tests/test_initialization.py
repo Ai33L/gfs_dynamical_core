@@ -1,8 +1,5 @@
-from climt import (
-    get_default_state, Frierson06LongwaveOpticalDepth, GrayLongwaveRadiation, HeldSuarez,
-    GridScaleCondensation, BergerSolarInsolation, SimplePhysics, RRTMGLongwave, RRTMGShortwave,
-    EmanuelConvection, SlabSurface, GFSDynamicalCore, DcmipInitialConditions, IceSheet,
-    Instellation, SimpleBoundaryLayer, BucketHydrology, get_grid
+from gfs_dynamical_core import (
+    get_default_state, GFSDynamicalCore, get_grid
 )
 import random
 from sympl import (
@@ -180,85 +177,6 @@ def create_3d_grid_test_for(cls):
     return test_component_3d_grid
 
 
-class ComponentQuantityInitializationTests(unittest.TestCase):
-
-    component_classes = (
-        Frierson06LongwaveOpticalDepth, GrayLongwaveRadiation, HeldSuarez,
-        GridScaleCondensation, BergerSolarInsolation, SimplePhysics,
-        RRTMGLongwave,
-        RRTMGShortwave,
-        EmanuelConvection, SlabSurface,
-        DcmipInitialConditions, IceSheet,
-        Instellation, SimpleBoundaryLayer,
-        BucketHydrology
-    )
-
-    pair_tests = 20
-    triplet_tests = 20
-
-    for cls in component_classes:
-        func = create_default_test_for(cls)
-        locals()[func.__name__] = func
-        func = create_1d_grid_test_for(cls)
-        locals()[func.__name__] = func
-        func = create_2d_grid_test_for(cls)
-        locals()[func.__name__] = func
-        func = create_3d_grid_test_for(cls)
-        locals()[func.__name__] = func
-
-    def test_GFSDynamicalCore(self):
-        grid = get_grid(nx=12, ny=16, nz=28)
-        component = GFSDynamicalCore()
-        state = get_default_state([component], grid_state=grid)
-        call_component(component, state)
-
-    def test_component_pairs(self):
-        random.seed(0)
-        for _ in range(self.pair_tests):
-            i, j = random.sample(range(len(self.component_classes)), 2)
-            component1 = self.component_classes[i]()
-            component2 = self.component_classes[j]()
-            print(component1.__class__.__name__, component2.__class__.__name__)
-            state = get_default_state([component1, component2])
-            call_component(component1, state)
-            call_component(component2, state)
-
-    def test_component_triplets(self):
-        random.seed(0)
-        for _ in range(self.triplet_tests):
-            i, j, k = random.sample(range(len(self.component_classes)), 3)
-            component1 = self.component_classes[i]()
-            component2 = self.component_classes[j]()
-            component3 = self.component_classes[k]()
-            print(component1.__class__.__name__, component2.__class__.__name__, component3.__class__.__name__)
-            state = get_default_state([component1, component2, component3])
-            call_component(component1, state)
-            call_component(component2, state)
-            call_component(component3, state)
-
-
-class TestFullMoistGFSDycoreWithPhysics(unittest.TestCase):
-
-    def get_component_instance(self):
-        # Create Radiation Prognostic
-        radiation = RRTMGLongwave()
-        # Create Convection Prognostic
-        convection = EmanuelConvection()
-        # Create a SimplePhysics Prognostic
-        boundary_layer = TimeDifferencingWrapper(
-            SimplePhysics()
-        )
-        return GFSDynamicalCore(
-            [radiation, convection, boundary_layer]
-        )
-
-    def test_component_3d_grid(self):
-        grid = get_grid(nx=16, ny=16, nz=16)
-        component = self.get_component_instance()
-        state = get_default_state([component], grid_state=grid)
-        call_component(component, state)
-
-
 class TestGFSDycoreWith32VerticalLevels(unittest.TestCase):
 
     def get_component_instance(self):
@@ -269,22 +187,6 @@ class TestGFSDycoreWith32VerticalLevels(unittest.TestCase):
         component = self.get_component_instance()
         state = get_default_state([component], grid_state=grid)
         call_component(component, state)
-
-
-def test_3d_initialization_is_full_based_on_wildcard():
-    grid_state = get_grid(nx=10, ny=10, nz=20)
-    rrtmg_shortwave = RRTMGShortwave()
-    instellation = Instellation()
-    state = get_default_state([rrtmg_shortwave, instellation], grid_state=grid_state)
-    for quantity_name, properties in rrtmg_shortwave.input_properties.items():
-        if '*' in properties['dims']:
-            assert len(state[quantity_name].dims) == len(properties['dims']) + 1
-        if tuple(properties['dims']) == ('*',):
-            assert set(state[quantity_name].dims) == {'lat', 'lon'}
-        elif tuple(properties['dims']) == ('mid_levels', '*'):
-            assert state[quantity_name].dims[0] == 'mid_levels'
-            assert set(state[quantity_name].dims[1:]) == {'lat', 'lon'}
-
 
 if __name__ == '__main__':
     pytest.main([__file__])
