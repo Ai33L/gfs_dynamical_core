@@ -102,8 +102,8 @@ openblas_path = lib_path_list[0]+'/libopenblas.a'
 if 'FC' not in os.environ:
     if operating_system == 'Darwin':
         # guess_compiler_name('FC')
-        os.environ['FC'] = 'gfortran-6'
-        os.environ['F77'] = 'gfortran-6'
+        os.environ['FC'] = 'gfortran-10'
+        os.environ['F77'] = 'gfortran-10'
     else:
         os.environ['FC'] = 'gfortran'
         os.environ['F77'] = 'gfortran'
@@ -111,7 +111,7 @@ if 'FC' not in os.environ:
 if 'CC' not in os.environ:
     if operating_system == 'Darwin':
         # guess_compiler_name('CC')
-        os.environ['CC'] = 'gcc-6'
+        os.environ['CC'] = 'gcc-10'
     else:
         os.environ['CC'] = 'gcc'
 
