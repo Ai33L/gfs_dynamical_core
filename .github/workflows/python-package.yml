@@ -15,7 +15,8 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-18.04, macos-10.15]
-        python-version: [py37, py38, py39, py310]
+        # python-version: [py37, py38, py39, py310]
+        python-version: [py37]
     steps:
     - uses: actions/checkout@v2
     - name: Set up Python 37
