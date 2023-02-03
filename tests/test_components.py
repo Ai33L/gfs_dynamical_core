@@ -14,6 +14,7 @@ from sympl import (
 )
 from sympl._core.tracers import reset_tracers, reset_packers
 from datetime import datetime, timedelta
+import climt
 os.environ['NUMBA_DISABLE_JIT'] = '1'
 
 vertical_dimension_names = [
@@ -130,7 +131,7 @@ class ComponentBaseColumn(ComponentBase):
         if component is None:
             component = self.get_component_instance()
         return climt.get_default_state(
-            [component], grid_state=get_grid(nx=None, ny=None, nz=30))
+            [component], grid_state=climt.get_grid(nx=None, ny=None, nz=30))
 
     def test_column_output_matches_cached_output(self):
         state = self.get_1d_input_state()
@@ -171,7 +172,7 @@ class ComponentBase3D(ComponentBase):
         if component is None:
             component = self.get_component_instance()
         return climt.get_default_state(
-            [component], grid_state=get_grid(nx=32, ny=16, nz=28))
+            [component], grid_state=climt.get_grid(nx=32, ny=16, nz=28))
 
     def test_3d_output_matches_cached_output(self):
         state = self.get_3d_input_state()
@@ -271,7 +272,7 @@ def compare_one_state_pair(current, cached):
         assert key in current.keys()
 
 
-@pytest.mark.skip("fails on CI, no idea why")
+# @pytest.mark.skip("fails on CI, no idea why")
 class TestGFSDycore(ComponentBase3D):
 
     def get_component_instance(self):

@@ -295,8 +295,8 @@ def set_model_grid(
     pyInvLap = np.zeros(nlm, dtype=np.double)
     pyGaussWeights = np.zeros(nlats, dtype=np.double)
 
-    pyDegree = np.zeros(nlm, dtype=np.int)
-    pyOrder = np.zeros(nlm, dtype=np.int)
+    pyDegree = np.zeros(nlm, dtype=np.int64)
+    pyOrder = np.zeros(nlm, dtype=np.int64)
 
     pyLats = np.zeros((nlats, nlons), dtype=np.double)
     pyLons = np.zeros((nlats, nlons), dtype=np.double)

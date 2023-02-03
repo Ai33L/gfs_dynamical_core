@@ -131,12 +131,12 @@ os.environ['FFLAGS'] = '-fPIC -fno-range-check ' + os.environ['GFS_OPT_FLAGS']
 os.environ['CFLAGS'] = '-fPIC ' + os.environ['GFS_OPT_FLAGS']
 
 if operating_system == 'Darwin':
-    gcc_dir = find_homebrew_gcc()
-    for root, dirs, files in os.walk(gcc_dir):
-        for line in files:
-            if re.match('libgfortran.a', line):
-                if not ('i386' in root):
-                    lib_path_list.append(root)
+#     gcc_dir = find_homebrew_gcc()
+#     for root, dirs, files in os.walk(gcc_dir):
+#         for line in files:
+#             if re.match('libgfortran.a', line):
+#                 if not ('i386' in root):
+#                     lib_path_list.append(root)
 
     os.environ['FFLAGS'] += ' -mmacosx-version-min=10.7'
     os.environ['CFLAGS'] += ' -mmacosx-version-min=10.7'
