@@ -1,5 +1,5 @@
 from __future__ import division
-from ..._core import ensure_contiguous_state
+from climt import ensure_contiguous_state
 from sympl import (
     get_constant, TendencyStepper, initialize_numpy_arrays_with_properties,
     get_numpy_arrays_with_properties, ImplicitTendencyComponentComposite,
