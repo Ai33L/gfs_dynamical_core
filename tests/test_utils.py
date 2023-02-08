@@ -1,4 +1,4 @@
-from gfs_dynamical_core import (
+from climt import (
     mass_to_volume_mixing_ratio,
     get_interface_values,
     calculate_q_sat, numpy_version_of,
