@@ -1,6 +1,10 @@
 from gfs_dynamical_core import (
-    get_default_state, GFSDynamicalCore, get_grid
+    GFSDynamicalCore
 )
+from climt import (
+    get_default_state, get_grid
+)
+
 import random
 from sympl import (
     TendencyComponent, DiagnosticComponent, Stepper,
