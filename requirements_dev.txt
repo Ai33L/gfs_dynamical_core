@@ -20,4 +20,3 @@ coveralls
 sympl>=0.4.1
 climt>=0.16.25
 matplotlib
-numba
