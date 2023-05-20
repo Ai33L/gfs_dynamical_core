@@ -211,7 +211,7 @@ setup(
         'gfs_dynamical_core',
     ],
     package_dir={'gfs_dynamical_core':
-                'gfs_dynamical_core'},
+                'gfs_dynamical_core/'},
     include_package_data=True,
     install_requires=requirements,
     cmdclass={
