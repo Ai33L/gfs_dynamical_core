@@ -15,15 +15,15 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-20.04, macos-11]
-        python-version: [py38, py39, py310]
+        python-version: [py37, py38, py39, py310]
         # python-version: [py37, py38]
     steps:
     - uses: actions/checkout@v2
-#     - name: Set up Python 37
-#       if: ${{ matrix.python-version == 'py37' }}
-#       uses: actions/setup-python@v2
-#       with:
-#         python-version: "3.7"
+    - name: Set up Python 37
+      if: ${{ matrix.python-version == 'py37' }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: "3.7"
     - name: Set up Python 38
       if: ${{ matrix.python-version == 'py38' }}
       uses: actions/setup-python@v2
