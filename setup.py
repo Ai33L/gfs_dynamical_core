@@ -201,7 +201,7 @@ ext_modules = [
 
 setup(
     name='gfs_dynamical_core',
-    version='0.1.2',
+    version='0.1.3',
     description='Only the dynamical core of the climt repository',
     long_description='',
     author="Rodrigo Caballero",
