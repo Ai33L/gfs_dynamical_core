@@ -191,9 +191,10 @@ setup(
     author="Rodrigo Caballero",
     author_email='rodrigo.caballero@misu.su.se',
     url='https://github.com/Ai33L/gfs_dynamical_core.git',
-    packages=[
-        'gfs_dynamical_core', 
-    ],
+    py_modules=['gfs_dynamical_core._components.gfs.component'],
+    # packages=[
+    #     'gfs_dynamical_core', 
+    # ],
     # package_dir={'':
     #             'gfs_dynamical_core'},
     include_package_data=True,
