@@ -182,22 +182,6 @@ class gfs_bdist_wheel(native_bdist_wheel):
 # if os.environ.get('READTHEDOCS') == 'True':
 #     ext_modules = []
 # else:
-    
-ext_modules = [
-        Extension(
-            'gfs_dynamical_core._components.gfs._gfs_dynamics',
-            sources=['gfs_dynamical_core/_components/gfs/_gfs_dynamics.pyx'],
-            libraries=libraries,
-            include_dirs=include_dirs,
-            extra_compile_args=['-fopenmp'] + default_compile_args,
-            library_dirs=lib_path_list,
-            extra_link_args=['-fopenmp', lib_path_list[0]+'/libgfs_dycore.a',
-                             lib_path_list[0]+'/libshtns_omp.a', lib_path_list[0]+'/libfftw3_omp.a',
-                             lib_path_list[0]+'/libfftw3.a', openblas_path] + default_link_args),
-
-        # lib_path+'/libshtns_omp.a', openblas_path, os.environ['COMPILER_PATH']+'../lib/libfftw3.a'] + default_link_args),
-
-    ]
 
 setup(
     name='gfs_dynamical_core',
@@ -218,7 +202,21 @@ setup(
         'build_ext': gfs_build_ext,
         'bdist_wheel': gfs_bdist_wheel,
     },
-    ext_modules=ext_modules,
+    ext_modules=[
+        Extension(
+            'gfs_dynamical_core._components.gfs._gfs_dynamics',
+            sources=['gfs_dynamical_core/_components/gfs/_gfs_dynamics.pyx'],
+            libraries=libraries,
+            include_dirs=include_dirs,
+            extra_compile_args=['-fopenmp'] + default_compile_args,
+            library_dirs=lib_path_list,
+            extra_link_args=['-fopenmp', lib_path_list[0]+'/libgfs_dycore.a',
+                             lib_path_list[0]+'/libshtns_omp.a', lib_path_list[0]+'/libfftw3_omp.a',
+                             lib_path_list[0]+'/libfftw3.a', openblas_path] + default_link_args),
+
+        # lib_path+'/libshtns_omp.a', openblas_path, os.environ['COMPILER_PATH']+'../lib/libfftw3.a'] + default_link_args),
+
+    ],
     include_dirs=include_dirs,
     license="BSD license",
     zip_safe=False,
