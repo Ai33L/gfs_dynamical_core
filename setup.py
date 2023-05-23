@@ -210,8 +210,8 @@ setup(
     packages=[
         'gfs_dynamical_core._components.gfs', 
     ],
-    package_dir={'':
-                'gfs_dynamical_core'},
+    # package_dir={'':
+    #             'gfs_dynamical_core'},
     include_package_data=True,
     install_requires=requirements,
     cmdclass={
