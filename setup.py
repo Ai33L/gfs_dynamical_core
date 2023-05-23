@@ -191,7 +191,7 @@ setup(
     author="Rodrigo Caballero",
     author_email='rodrigo.caballero@misu.su.se',
     url='https://github.com/Ai33L/gfs_dynamical_core.git',
-    py_modules=['gfs_dynamical_core._components.gfs.component'],
+    py_modules=['gfs_dynamical_core.component'],
     # packages=[
     #     'gfs_dynamical_core', 
     # ],
@@ -205,8 +205,8 @@ setup(
     },
     ext_modules=[
         Extension(
-            'gfs_dynamical_core._components.gfs._gfs_dynamics',
-            sources=['gfs_dynamical_core/_components/gfs/_gfs_dynamics.pyx'],
+            'gfs_dynamical_core._gfs_dynamics',
+            sources=['gfs_dynamical_core/_gfs_dynamics.pyx'],
             libraries=libraries,
             include_dirs=include_dirs,
             extra_compile_args=['-fopenmp'] + default_compile_args,
