@@ -1,4 +1,3 @@
-from __future__ import division
 from climt._core import ensure_contiguous_state
 from sympl import (
     get_constant, TendencyStepper, initialize_numpy_arrays_with_properties,
