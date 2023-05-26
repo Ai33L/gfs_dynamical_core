@@ -43,7 +43,7 @@ requirements = [
     'sympl==0.4.1',
     'cython>=0.25',
     'scipy>=0.18.1',
-    'climt>=0.16.25'
+    'climt>=0.16.25',
 ]
 
 test_requirements = [
