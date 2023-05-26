@@ -43,7 +43,6 @@ requirements = [
     'sympl==0.4.1',
     'cython>=0.25',
     'scipy>=0.18.1',
-    'climt>=0.16.25',
 ]
 
 test_requirements = [
@@ -176,12 +175,6 @@ class gfs_bdist_wheel(native_bdist_wheel):
     def run(self):
         self.run_command('build')
         native_bdist_wheel.run(self)
-
-
-# Define extensions to be built
-# if os.environ.get('READTHEDOCS') == 'True':
-#     ext_modules = []
-# else:
 
 setup(
     name='gfs_dynamical_core',
