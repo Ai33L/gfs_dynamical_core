@@ -30,11 +30,11 @@ except ImportError:
 
 include_dirs = [np.get_include()]
 
-# with open('README.rst') as readme_file:
-#     readme = readme_file.read()
+with open('README.rst') as readme_file:
+    readme = readme_file.read()
 
-# with open('HISTORY.rst') as history_file:
-#     history = history_file.read()
+with open('HISTORY.rst') as history_file:
+    history = history_file.read()
 
 requirements = [
     'numpy>=1.16.0',
@@ -43,7 +43,6 @@ requirements = [
     'sympl==0.4.1',
     'cython>=0.25',
     'scipy>=0.18.1',
-    'climt>=0.16.25',
 ]
 
 test_requirements = [
@@ -187,7 +186,7 @@ setup(
     name='gfs_dynamical_core',
     version='0.1.9',
     description='Only the dynamical core of the climt repository',
-    long_description='',
+    long_description=readme + '\n\n' + history,
     author="Rodrigo Caballero",
     author_email='rodrigo.caballero@misu.su.se',
     url='https://github.com/Ai33L/gfs_dynamical_core.git',
