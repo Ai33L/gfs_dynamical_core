@@ -5,4 +5,4 @@ History
 Latest
 ---------
 
-* GFS dynamical core moved over and working
+* GFS Dynamical core shifted over and working.
