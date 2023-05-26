@@ -13,4 +13,3 @@ Installation
 gfs-dynamical-core can be installed directly from the python package index using pip.
 
     pip install gfs-dynamical-core
-
