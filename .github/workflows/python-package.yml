@@ -1,5 +1,3 @@
-
-
 # This workflow will install Python dependencies, run tests and lint with a variety of Python versions
 # For more information see: https://help.github.com/actions/language-and-framework-guides/using-python-with-github-actions
 
@@ -16,25 +14,31 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-18.04, macos-10.15]
-        python-version: [py36 , py37, py38]
+        os: [ubuntu-20.04, macos-11]
+        python-version: [py38, py39, py310]
+        # python-version: [py37, py38]
     steps:
     - uses: actions/checkout@v2
-    - name: Set up Python 36
-      if: ${{ matrix.python-version == 'py36' }} 
-      uses: actions/setup-python@v2
-      with:
-        python-version: 3.6
-    - name: Set up Python 37
-      if: ${{ matrix.python-version == 'py37' }}
-      uses: actions/setup-python@v2
-      with:
-        python-version: 3.7
+#     - name: Set up Python 37
+#       if: ${{ matrix.python-version == 'py37' }}
+#       uses: actions/setup-python@v2
+#       with:
+#         python-version: "3.7"
     - name: Set up Python 38
       if: ${{ matrix.python-version == 'py38' }}
       uses: actions/setup-python@v2
       with:
-        python-version: 3.8
+        python-version: "3.8"
+    - name: Set up Python 39
+      if: ${{ matrix.python-version == 'py39' }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: "3.9"
+    - name: Set up Python 310
+      if: ${{ matrix.python-version == 'py310' }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: "3.10"
 
     - name: Install dependencies
       run: |
@@ -44,14 +48,16 @@ jobs:
     - name: Lint with flake8
       run: |
         # stop the build if there are Python syntax errors or undefined names
-        flake8 climt_core/ --count --show-source --statistics
-    - name: Build climt
+        flake8 --ignore=E501,E226,W504,W605 gfs_dynamical_core/ --count --show-source --statistics
+    - name: Build gfs
       run: |
             if [ "$RUNNER_OS" == "Linux" ]; then
               gfortran --version
-              CC=gcc-7 FC=gfortran-7 CLIMT_ARCH=Linux tox -e ${{ matrix.python-version }}
+              CLIMT_ARCH=Linux tox -e ${{ matrix.python-version }}
             elif [ "$RUNNER_OS" == "macOS" ]; then
-              CC=gcc-8 FC=gfortran-8 CLIMT_ARCH=Darwin tox -e ${{ matrix.python-version }}
+              # which gcc #/usr/bin/gcc
+              # which gfortran
+              CLIMT_ARCH=Darwin tox -e ${{ matrix.python-version }}
             else 
               echo "$RUNNER_OS not supported"
               exit 1
