@@ -1,6 +1,6 @@
-=====
+==================
 gfs-dynamical-core
-=====
+==================
 
 **gfs-dynamical-core** is home to the GFS dynamical core, which was previously available on
 CliMT.
