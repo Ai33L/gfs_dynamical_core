@@ -184,7 +184,7 @@ class gfs_bdist_wheel(native_bdist_wheel):
 
 setup(
     name='gfs_dynamical_core',
-    version='0.1.11',
+    version='0.1.12',
     description='Only the dynamical core of the climt repository',
     long_description=readme + '\n\n' + history,
     author="Rodrigo Caballero",
