@@ -185,7 +185,7 @@ class gfs_bdist_wheel(native_bdist_wheel):
 
 setup(
     name='gfs_dynamical_core',
-    version='0.1.4',
+    version='0.1.19',
     description='Only the dynamical core of the climt repository',
     long_description='',
     author="Rodrigo Caballero",
@@ -227,12 +227,9 @@ setup(
         'Intended Audience :: Developers',
         'License :: OSI Approved :: BSD License',
         'Natural Language :: English',
-        "Programming Language :: Python :: 2",
-        'Programming Language :: Python :: 2.7',
-        'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.4',
-        'Programming Language :: Python :: 3.5',
-        'Programming Language :: Python :: 3.6',
+        'Programming Language :: Python :: 3.8',
+        'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.10',
     ],
     test_suite='tests',
     tests_require=test_requirements
