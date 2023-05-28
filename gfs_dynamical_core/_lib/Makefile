@@ -61,7 +61,7 @@ sht_lib: $(CLIMT_ARCH)/libshtns_omp.a
 blas_lib: $(CLIMT_ARCH)/libopenblas.a
 
 $(CLIMT_ARCH)/libopenblas.a:
-	if [ ! -d $(BLAS_DIR) ]; then mkdir $(BLAS_DIR); tar -xvzf $(BLAS_GZ) -C $(BLAS_DIR) --strip-components=1 > log 2>&1; fi; cd $(BLAS_DIR); CFLAGS=$(CLIMT_CFLAGS) make TARGET=GENERIC NO_SHARED=1 NO_LAPACK=0 > log 2>&1 ; make PREFIX=$(BASE_DIR) NO_SHARED=1 NO_LAPACK=0 install > log.install.blas 2>&1 ; cp ../lib/libopenblas.a $(LIB_DIR)
+	if [ ! -d $(BLAS_DIR) ]; then mkdir $(BLAS_DIR); tar -xvzf $(BLAS_GZ) -C $(BLAS_DIR) --strip-components=1 > log 2>&1; fi; cd $(BLAS_DIR); CFLAGS=$(CLIMT_CFLAGS) make TARGET=HASWELL DYNAMIC_ARCH=1 NO_SHARED=1 NO_LAPACK=0 > log 2>&1 ; make PREFIX=$(BASE_DIR) NO_SHARED=1 NO_LAPACK=0 install > log.install.blas 2>&1 ; cp ../lib/libopenblas.a $(LIB_DIR)
 
 # GFS Configuration
 
