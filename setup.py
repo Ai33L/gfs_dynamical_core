@@ -183,7 +183,7 @@ setup(
     description='Only the dynamical core of the climt repository',
     long_description=readme + '\n\n' + history,
     author="Abel Shibu",
-    author_email='rodrigo.caballero@misu.su.se',
+    author_email='abels2000@gmail.com',
     url='https://github.com/Ai33L/gfs_dynamical_core.git',
     py_modules=['gfs_dynamical_core.component'],
     # packages=[
