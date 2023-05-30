@@ -26,17 +26,17 @@ jobs:
 #         python-version: "3.7"
     - name: Set up Python 38
       if: ${{ matrix.python-version == 'py38' }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v3
       with:
         python-version: "3.8"
     - name: Set up Python 39
       if: ${{ matrix.python-version == 'py39' }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v3
       with:
         python-version: "3.9"
     - name: Set up Python 310
       if: ${{ matrix.python-version == 'py310' }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v3
       with:
         python-version: "3.10"
 
