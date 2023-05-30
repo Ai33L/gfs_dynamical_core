@@ -5,4 +5,4 @@ History
 Latest
 ---------
 
-* GFS Dynamical core shifted over and working.
+* GFS Dynamical core shifted over from CliMT and working.

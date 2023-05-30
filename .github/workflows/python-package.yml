@@ -18,7 +18,7 @@ jobs:
         python-version: [py38, py39, py310]
         # python-version: [py37, py38]
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
 #     - name: Set up Python 37
 #       if: ${{ matrix.python-version == 'py37' }}
 #       uses: actions/setup-python@v2
