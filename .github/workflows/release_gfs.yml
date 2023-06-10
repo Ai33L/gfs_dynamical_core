@@ -11,7 +11,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-20.04,macOS-11]
-        python-version: [py38, py39, py310]
+        # python-version: [py38, py39, py310]
         #, windows-2019, macOS-10.15]
 
     steps:
