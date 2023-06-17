@@ -30,11 +30,11 @@ except ImportError:
 
 include_dirs = [np.get_include()]
 
-# with open('README.rst') as readme_file:
-#     readme = readme_file.read()
+with open('README.rst') as readme_file:
+    readme = readme_file.read()
 
-# with open('HISTORY.rst') as history_file:
-#     history = history_file.read()
+with open('HISTORY.rst') as history_file:
+    history = history_file.read()
 
 requirements = [
     'numpy>=1.16.0',
@@ -43,7 +43,7 @@ requirements = [
     'sympl==0.4.1',
     'cython>=0.25',
     'scipy>=0.18.1',
-    'climt>=0.16.25',
+    'climt==0.17.12',
 ]
 
 test_requirements = [
@@ -177,21 +177,15 @@ class gfs_bdist_wheel(native_bdist_wheel):
         self.run_command('build')
         native_bdist_wheel.run(self)
 
-
-# Define extensions to be built
-# if os.environ.get('READTHEDOCS') == 'True':
-#     ext_modules = []
-# else:
-
 setup(
     name='gfs_dynamical_core',
-    version='0.1.3',
+    version='0.1.36',
     description='Only the dynamical core of the climt repository',
-    long_description='',
-    author="Rodrigo Caballero",
-    author_email='rodrigo.caballero@misu.su.se',
+    long_description=readme + '\n\n' + history,
+    author="Abel Shibu",
+    author_email='abels2000@gmail.com',
     url='https://github.com/Ai33L/gfs_dynamical_core.git',
-    py_modules=['gfs_dynamical_core._components.gfs.component'],
+    py_modules=['gfs_dynamical_core.component'],
     # packages=[
     #     'gfs_dynamical_core', 
     # ],
@@ -205,8 +199,8 @@ setup(
     },
     ext_modules=[
         Extension(
-            'gfs_dynamical_core._components.gfs._gfs_dynamics',
-            sources=['gfs_dynamical_core/_components/gfs/_gfs_dynamics.pyx'],
+            'gfs_dynamical_core._gfs_dynamics',
+            sources=['gfs_dynamical_core/_gfs_dynamics.pyx'],
             libraries=libraries,
             include_dirs=include_dirs,
             extra_compile_args=['-fopenmp'] + default_compile_args,
@@ -227,12 +221,9 @@ setup(
         'Intended Audience :: Developers',
         'License :: OSI Approved :: BSD License',
         'Natural Language :: English',
-        "Programming Language :: Python :: 2",
-        'Programming Language :: Python :: 2.7',
-        'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.4',
-        'Programming Language :: Python :: 3.5',
-        'Programming Language :: Python :: 3.6',
+        'Programming Language :: Python :: 3.8',
+        'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.10',
     ],
     test_suite='tests',
     tests_require=test_requirements
