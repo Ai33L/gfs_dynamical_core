@@ -1,4 +1,4 @@
-# Contributing
+<!-- # Contributing
 
 Contributions are welcome, and they are greatly appreciated! Every
 little bit helps, and credit will always be given.
@@ -105,4 +105,4 @@ Before you submit a pull request, check that it meets these guidelines:
     the feature to the list in README.rst.
 3.  The pull request should work for Python 3.5, 3.6, 3.7 and 3.8, and
     for PyPy. Check <https://github.com/Ai33L/climt_core/pull_requests> and make sure that the tests pass for all
-    supported Python versions.
+    supported Python versions. -->

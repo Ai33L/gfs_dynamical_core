@@ -1,4 +1,4 @@
  
-# climt_core module
+# gfs_dynamical_core module
 
-::: climt_core.climt_core
+::: gfs_dynamical_core.gfs_dynamical_core
