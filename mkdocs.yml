@@ -1,8 +1,8 @@
-site_name: climt_core
+site_name: gfs_dynamical_core
 
-site_url: https://Ai33L.github.io/climt_core
+site_url: https://Ai33L.github.io/gfs_dynamical_core
 
-repo_url: https://github.com/Ai33L/climt_core
+repo_url: https://github.com/Ai33L/gfs_dynamical_core
 
 theme:
     palette:
@@ -47,6 +47,6 @@ nav:
     - Contributing: contributing.md
     - FAQ: faq.md
     - Changelog: changelog.md
-    - Report Issues: https://github.com/Ai33L/climt_core/issues
+    - Report Issues: https://github.com/Ai33L/gfs_dynamical_core/issues
     - API Reference:
-          - climt_core module: climt_core.md
+          - climt_core module: gfs_dynamical_core.md
