@@ -1,5 +1,5 @@
 .. _component_list:
-.. currentmodule:: gfs-dynamical-core
+.. currentmodule:: gfs_dynamical_core
 
 ==========
 Components
