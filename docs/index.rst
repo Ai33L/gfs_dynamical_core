@@ -30,7 +30,8 @@ Contents:
 
    introduction
    installation
-   
+   components
+
 
 Indices and tables
 ==================
