@@ -1,4 +1,4 @@
-Welcome to climt's documentation!
+Welcome to gfs_dynamical_core's documentation!
 =================================
 
 .. figure:: climt_logo.jpg

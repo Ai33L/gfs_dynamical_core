@@ -1,10 +1,10 @@
-climt package
+gfs_dynamical_core package
 =============
 
 Module contents
 ---------------
 
-.. automodule:: gfs-dynamical-core
+.. automodule:: gfs_dynamical_core
     :members:
     :undoc-members:
     :show-inheritance:
