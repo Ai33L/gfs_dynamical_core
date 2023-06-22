@@ -4,7 +4,7 @@ climt package
 Module contents
 ---------------
 
-.. automodule:: climt
+.. automodule:: gfs-dynamical-core
     :members:
     :undoc-members:
     :show-inheritance:

@@ -1,5 +1,5 @@
 .. _component_list:
-.. currentmodule:: climt
+.. currentmodule:: gfs-dynamical-core
 
 ==========
 Components
