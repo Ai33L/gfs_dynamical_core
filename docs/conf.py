@@ -65,7 +65,6 @@ master_doc = 'index'
 
 # General information about the project.
 project = u'gfs_dynamical_core'
-copyright = u"2006-2017, Rodrigo Caballero"
 
 # The version info for the project you're documenting, acts as replacement
 # for |version| and |release|, also used in various other places throughout
@@ -225,9 +224,9 @@ latex_elements = {
 # (source start file, target name, title, author, documentclass
 # [howto/manual]).
 latex_documents = [
-    ('index', 'gfs_dynamcial_core.tex',
+    ('index', 'gfs_dynamical_core.tex',
      u'gfs_dynamical_core Documentation',
-     u'Rodrigo Caballero', 'manual'),
+     u'Abel Shibu', 'manual'),
 ]
 
 # The name of an image file (relative to this directory) to place at
@@ -258,7 +257,7 @@ latex_domain_indices = True
 man_pages = [
     ('index', 'gfs_dynamical_core',
      u'gfs_dynamical_core Documentation',
-     [u'Rodrigo Caballero'], 1)
+     [u'Abel Shibu'], 1)
 ]
 
 # If true, show URL addresses after external links.
@@ -273,9 +272,9 @@ man_pages = [
 texinfo_documents = [
     ('index', 'gfs_dynamical_core',
      u'gfs_dynamical_core Documentation',
-     u'Rodrigo Caballero',
+     u'Abel Shibu',
      'gfs_dynamical_core',
-     'gfs_dynamical_core is a Toolkit for building Earth system models in Python.',
+     'gfs_dynamical_core package is home to the GFS Dynamical Core that was previously available in the CliMT package.',
      'Miscellaneous'),
 ]
 
