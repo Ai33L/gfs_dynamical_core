@@ -1,7 +1,7 @@
 Welcome to gfs_dynamical_core's documentation!
 =================================
 
-The gfs_dynamical_core package is home to the GFS Dynamical Core that was previously a part of
+The gfs_dynamical_core package is home to the GFS Dynamical Core that was previously part of
 the `CliMT`_ repository.
 
 .. _CliMT:
@@ -14,3 +14,5 @@ Contents:
 
    installation
    components
+   authors
+   history

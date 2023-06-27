@@ -5,7 +5,7 @@ Credits
 Original Creator
 ----------------
 
-* Rodrigo Caballero <rodrigo.caballero@misu.su.se>
+* Jeff Whitaker <jeffrey.s.whitaker@noaa.gov>
 
 Development Lead
 ----------------
