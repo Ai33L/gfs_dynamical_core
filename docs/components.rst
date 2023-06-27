@@ -5,11 +5,7 @@
 Components
 ==========
 
-This page documents the different components available through gfs_dynamical_core.
-
-
-Dynamics
----------
+Given below are the components available on the gfs_dynamical_core package.
 
 .. autosummary::
     :toctree: generated/

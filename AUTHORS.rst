@@ -10,10 +10,9 @@ Original Creator
 Development Lead
 ----------------
 
-* Joy Monteiro <joy.monteiro@misu.su.se>
+* Abel Shibu <abels2000@gmail.com>
 
 Contributors
 ------------
 
-* Jeremy McGibbon <mcgibbon@uw.edu>
-* Abel Shibu <abel.shibu@students.iiserpune.ac.in>
+* Joy Monteiro <joy.monteiro@misu.su.se>
