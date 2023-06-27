@@ -23,5 +23,5 @@ for instructions.
 .. _sympl: https://github.com/mcgibbon/sympl
 .. _Pint: https://pint.readthedocs.io
 .. _xarray: http://xarray.pydata.org
-.. _documentation: http://climt.readthedocs.io/en/latest/installation.html
+.. _documentation: https://gfs-dynamical-core.readthedocs.io
 .. _CliMT: https://github.com/CliMT/climt
