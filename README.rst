@@ -3,9 +3,7 @@ gfs-dynamical-core
 ==================
 
 **gfs-dynamical-core** is home to the GFS dynamical core, which was previously available on
-CliMT.
-
-* Free software: BSD license
+CliMT_.
 
 Installation
 -------------
@@ -13,3 +11,17 @@ Installation
 gfs-dynamical-core can be installed directly from the python package index using pip.
 
     pip install gfs-dynamical-core
+
+This command should work on most systems and will install wheels for generic architecture. However,
+this may result in a slower code.
+
+To optimise the package for your system architecture, build it from source. See the documentation_
+for instructions.
+
+.. _Cookiecutter: https://github.com/audreyr/cookiecutter
+.. _`audreyr/cookiecutter-pypackage`: https://github.com/audreyr/cookiecutter-pypackage
+.. _sympl: https://github.com/mcgibbon/sympl
+.. _Pint: https://pint.readthedocs.io
+.. _xarray: http://xarray.pydata.org
+.. _documentation: https://gfs-dynamical-core.readthedocs.io
+.. _CliMT: https://github.com/CliMT/climt
