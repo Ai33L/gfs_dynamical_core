@@ -34,7 +34,7 @@ Installing from source
 
 The sources for gfs_dynamical_core can be downloaded from the `Github repo`_.
 
-You can either clone the public repository:
+To clone the public repository:
 
 .. code-block:: console
 
