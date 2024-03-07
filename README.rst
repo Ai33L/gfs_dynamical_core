@@ -2,7 +2,7 @@
 gfs-dynamical-core
 ==================
 
-**gfs-dynamical-core** is home to the GFS dynamical core, which was previously available on
+**gfs-dynamical-core** is home to the GFS dynamical core, which was previously a part of
 CliMT_.
 
 Installation
