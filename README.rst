@@ -14,6 +14,12 @@ gfs-dynamical-core can be installed directly from the python package index using
 
     pip install gfs-dynamical-core
 
+Working versions - 0.1.23 and 0.1.9
+
+Specify the version if required
+
+    pip install gfs-dynamical-core==0.1.23
+
 This command should work on most systems and will install wheels for generic architecture. However,
 this may result in a slightly slower code.
 
