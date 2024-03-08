@@ -1,22 +1,18 @@
-Welcome to Lumache's documentation!
-===================================
+Welcome to gfs_dynamical_core's documentation!
+==============================================
 
-**Lumache** (/lu'make/) is a Python library for cooks and food lovers
-that creates recipes mixing random ingredients.
-It pulls data from the `Open Food Facts database <https://world.openfoodfacts.org/>`_
-and offers a *simple* and *intuitive* API.
+The gfs_dynamical_core package is home to the GFS Dynamical Core that was previously part of
+the `CliMT`_ package.
 
-Check out the :doc:`usage` section for further information, including
-how to :ref:`installation` the project.
+.. _CliMT:
+    https://climt.readthedocs.io/
 
-.. note::
+.. Contents:
 
-   This project is under active development.
+.. .. toctree::
+..    :maxdepth: 2
 
-Contents
---------
-
-.. toctree::
-
-   usage
-   api
+..    installation
+..    components
+..    authors
+..    history
