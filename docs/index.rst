@@ -14,3 +14,5 @@ Contents:
 
    installation
    components
+   authors
+   history
