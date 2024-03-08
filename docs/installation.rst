@@ -15,6 +15,14 @@ You can install gfs_dynamical_core using the command
 
     $ pip install gfs_dynamical_core
 
+Working versions - 0.1.23 and 0.1.9
+
+Specify the version if required
+
+.. code-block:: console
+
+    $ pip install gfs-dynamical-core==0.1.23
+
 On Ubuntu Linux, you might need to prefix the above command with :code:`sudo`. This command should
 work on Linux and Mac. This package is currently not available on Windows.
 
