@@ -7,12 +7,10 @@ the `CliMT`_ package.
 .. _CliMT:
     https://climt.readthedocs.io/
 
-.. Contents:
+Contents:
 
-.. .. toctree::
-..    :maxdepth: 2
+.. toctree::
+   :maxdepth: 2
 
-..    installation
-..    components
-..    authors
-..    history
+   installation
+   components
