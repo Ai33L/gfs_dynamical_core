@@ -7,7 +7,7 @@ repo_url: https://github.com/Ai33L/gfs_dynamical_core
 theme:
     palette:
         scheme: preference
-    name: readthedocs
+    name: material
     icon:
         repo: fontawesome/brands/github
     features:
