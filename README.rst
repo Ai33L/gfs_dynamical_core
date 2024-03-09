@@ -10,7 +10,8 @@ Installation
 
 Python versions supported - 3.8, 3.9 and 3.10
 
-gfs-dynamical-core can be installed directly from the python package index using pip.
+gfs-dynamical-core can be installed directly from the python package index using pip. This should
+also automatically install the correct version of climt.
 
     pip install gfs-dynamical-core
 
