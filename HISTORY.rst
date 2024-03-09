@@ -2,7 +2,13 @@
 History
 =======
 
-Latest
----------
+v0.1.23
+~~~~~~~
 
-* GFS Dynamical core moved from CLiMT to this repository.
+* Pypi build for 'GENERIC' architecture on Linux and MacOS.
+
+v0.1.9
+~~~~~~
+
+* GFS Dynamical core moved over from the CLiMT repository.
+* Pypi build released for Linux and MacOS.

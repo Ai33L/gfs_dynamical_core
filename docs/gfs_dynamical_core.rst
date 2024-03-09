@@ -1,5 +1,5 @@
 gfs_dynamical_core package
-=============
+==========================
 
 Module contents
 ---------------

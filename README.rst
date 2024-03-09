@@ -2,18 +2,27 @@
 gfs-dynamical-core
 ==================
 
-**gfs-dynamical-core** is home to the GFS dynamical core, which was previously available on
+**gfs-dynamical-core** is home to the GFS dynamical core, which was previously a part of
 CliMT_.
 
 Installation
 -------------
 
-gfs-dynamical-core can be installed directly from the python package index using pip.
+Python versions supported - 3.8, 3.9 and 3.10
+
+gfs-dynamical-core can be installed directly from the python package index using pip. This should
+also automatically install the correct version of climt.
 
     pip install gfs-dynamical-core
 
+Working versions - 0.1.23 and 0.1.9
+
+Specify the version if required
+
+    pip install gfs-dynamical-core==0.1.23
+
 This command should work on most systems and will install wheels for generic architecture. However,
-this may result in a slower code.
+this may result in a slightly slower code.
 
 To optimise the package for your system architecture, build it from source. See the documentation_
 for instructions.
