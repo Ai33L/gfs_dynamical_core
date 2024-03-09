@@ -28,7 +28,6 @@ work on Linux and Mac. This package is currently not available on Windows.
 
 .. NOTE::
     If you are not using Anaconda, please ensure you have the libpython library installed.
-    See the next section for instructions to install libpython.
 
 This is the simplest way to install the gfs_dynamical_core package and does not require a compiler
 on your system. However, as pip installs wheels for a generic system architecture, installing via pip
@@ -50,7 +49,8 @@ To clone the public repository:
 
     $ git clone https://github.com/Ai33L/gfs_dynamical_core.git
 
-Once you have a copy of the source, you can install it with:
+Once you have a copy of the source, you can install it from inside the 
+gfs_dynamical_core directory with:
 
 .. code-block:: console
 
@@ -95,6 +95,23 @@ default compiler that ships with Mac (called :code:`gcc`, but is actually a
 different compiler) cannot
 compile OpenMP programs.
 
+Common build issues
+~~~~~~~~~~~~~~~~~~~
+
+A frequent issue is OpenBLAS build failing. This happens when OpenBLAS fails to detect cpu architecture and/or if a particular cpu 
+is not supported. If you face this issue, modify line 64 in gfs_dynamical_core/_lib/Makefile
+
+.. code-block:: console
+
+    $ if [ ! -d $(BLAS_DIR) ]; then mkdir $(BLAS_DIR); tar -xvzf $(BLAS_GZ) -C $(BLAS_DIR) --strip-components=1 > log 2>&1; fi; cd $(BLAS_DIR); CFLAGS=$(CLIMT_CFLAGS) make NO_SHARED=1 NO_LAPACK=0 > log 2>&1 ; make PREFIX=$(BASE_DIR) NO_SHARED=1 NO_LAPACK=0 install > log.install.blas 2>&1 ; cp ../lib/libopenblas.a $(LIB_DIR)
+
+Modify this to
+
+.. code-block:: console
+
+    $ if [ ! -d $(BLAS_DIR) ]; then mkdir $(BLAS_DIR); tar -xvzf $(BLAS_GZ) -C $(BLAS_DIR) --strip-components=1 > log 2>&1; fi; cd $(BLAS_DIR); CFLAGS=$(CLIMT_CFLAGS) make TARGET='GENERIC' NO_SHARED=1 NO_LAPACK=0 > log 2>&1 ; make PREFIX=$(BASE_DIR) NO_SHARED=1 NO_LAPACK=0 install > log.install.blas 2>&1 ; cp ../lib/libopenblas.a $(LIB_DIR)
+
+Speciying a GENERIC architecture will not optimise for the specific architecture, but should solve the build issue in most cases.
 
 .. _Homebrew: https://brew.sh/
 .. _pip: https://pip.pypa.io
