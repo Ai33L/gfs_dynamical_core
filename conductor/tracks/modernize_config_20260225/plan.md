@@ -7,7 +7,7 @@
 - [x] Task: Conductor - User Manual Verification 'Infrastructure Setup' (Protocol in workflow.md) a2fb710
 
 ## Phase 2: Migration & Cleanup
-- [ ] Task: Write tests to verify metadata extraction and package installation.
+- [x] Task: Write tests to verify metadata extraction and package installation. aa23ee9
 - [ ] Task: Implement metadata migration to pyproject.toml.
 - [ ] Task: Implement dependency migration to pyproject.toml.
 - [ ] Task: Conductor - User Manual Verification 'Migration & Cleanup' (Protocol in workflow.md)
