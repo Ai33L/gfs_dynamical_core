@@ -1,7 +1,7 @@
 # Implementation Plan: Modernize project configuration and linting
 
 ## Phase 1: Infrastructure Setup
-- [ ] Task: Audit current configuration files (setup.py, setup.cfg, requirements_dev.txt, tox.ini).
+- [x] Task: Audit current configuration files (setup.py, setup.cfg, requirements_dev.txt, tox.ini). dc9cfe9
 - [ ] Task: Create initial pyproject.toml with setuptools build-system.
 - [ ] Task: Configure Ruff in pyproject.toml.
 - [ ] Task: Conductor - User Manual Verification 'Infrastructure Setup' (Protocol in workflow.md)
