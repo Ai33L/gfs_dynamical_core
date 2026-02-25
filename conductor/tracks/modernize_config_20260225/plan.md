@@ -2,7 +2,7 @@
 
 ## Phase 1: Infrastructure Setup
 - [x] Task: Audit current configuration files (setup.py, setup.cfg, requirements_dev.txt, tox.ini). dc9cfe9
-- [ ] Task: Create initial pyproject.toml with setuptools build-system.
+- [x] Task: Create initial pyproject.toml with setuptools build-system. 8692d1e
 - [ ] Task: Configure Ruff in pyproject.toml.
 - [ ] Task: Conductor - User Manual Verification 'Infrastructure Setup' (Protocol in workflow.md)
 
