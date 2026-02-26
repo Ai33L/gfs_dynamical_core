@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel", "Cython>=0.25", "numpy>=1.16.0"]
+requires = ["setuptools>=61.0", "wheel", "Cython>=0.25", "numpy>=1.16.0", "pip"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "gfs_dynamical_core"
-version = "0.1.39"
+version = "0.2.0"
 description = "Only the dynamical core of the climt repository"
 readme = "README.rst"
 authors = [
@@ -28,7 +28,7 @@ dependencies = [
     "sympl==0.5.0",
     "cython>=0.25",
     "scipy>=0.18.1",
-    "climt==0.17.13",
+    "climt==0.18.4",
 ]
 
 [project.urls]
