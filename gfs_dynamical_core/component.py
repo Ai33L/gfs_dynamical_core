@@ -410,7 +410,7 @@ class GFSDynamicalCore(TendencyStepper):
                 'air_pressure', 'tracers', 'eastward_wind', 'northward_wind',
                 'divergence_of_wind', 'atmosphere_relative_vorticity',
                 'surface_air_pressure',):
-            if np.product(outputs[name].shape) > 0:
+            if np.prod(outputs[name].shape) > 0:
                 outputs[name][:] = state[name]
 
         _gfs_dynamics.assign_grid_arrays(

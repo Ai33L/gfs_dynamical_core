@@ -1,6 +1,6 @@
 FFTW_DIR = fftw-3.3.6-pl2
 SHT_DIR = shtns-2.7-r557
-BLAS_DIR = OpenBLAS-0.3.20
+BLAS_DIR = OpenBLAS-0.3.30
 GFS_DIR = GFS
 SIM_PHYS_DIR = simple_physics
 EMAN_DIR = emanuel
@@ -10,11 +10,11 @@ DCMIP_DIR=dcmip
 
 FFTW_GZ = fftw-3.3.6-pl2.tar.gz
 SHT_GZ = shtns-2.7-r557.tar.gz
-BLAS_GZ = OpenBLAS-0.3.20.tar.gz
+BLAS_GZ = OpenBLAS-0.3.30.tar.gz
 
 BASE_DIR = $(PWD)
 
-CLIMT_FFTW_FLAGS = --enable-openmp --enable-avx --enable-avx2
+CLIMT_FFTW_FLAGS = --enable-openmp #--enable-avx --enable-avx2
 
 LIB_DIR= $(BASE_DIR)/$(CLIMT_ARCH)/
 CLIMT_CFLAGS =  "-I$(BASE_DIR) -L$(LIB_DIR) $(CFLAGS)"

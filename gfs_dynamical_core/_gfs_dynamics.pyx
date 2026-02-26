@@ -236,7 +236,7 @@ cdef cnp.double_t[:,:] tempLnpsTend
 # Shtns arrays
 cdef cnp.double_t[:, :] pyLats, pyLons, pyAreaWeights
 cdef cnp.double_t[:] pyLap, pyInvLap, pyGaussWeights
-cdef cnp.int_t[:] pyDegree, pyOrder
+cdef cnp.int64_t[:] pyDegree, pyOrder
 
 
 # Grid size
