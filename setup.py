@@ -45,7 +45,7 @@ requirements = [
     "sympl==0.5.0",
     "cython>=0.25",
     "scipy>=0.18.1",
-    "climt==0.17.13",
+    "climt==0.18.4",
 ]
 
 test_requirements = [
@@ -181,7 +181,7 @@ class gfs_bdist_wheel(native_bdist_wheel):
 
 setup(
     name="gfs_dynamical_core",
-    version="0.1.39",
+    version="0.2.0",
     description="Only the dynamical core of the climt repository",
     long_description=readme + "\n\n" + history,
     author="Abel Shibu",
