@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "gfs_dynamical_core"
 version = "0.2.0"
 description = "Only the dynamical core of the climt repository"
-readme = "README.rst"
+readme = { file = ["README.rst", "HISTORY.rst"], content-type = "text/x-rst" }
 authors = [
     { name = "Abel Shibu", email = "abels2000@gmail.com" }
 ]
