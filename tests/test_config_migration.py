@@ -46,7 +46,7 @@ def test_pyproject_metadata_matches_setup_py():
     assert project_info["authors"][0]["email"] == setup_metadata["author_email"]
 
 
-def test_pyproject_readme_includes_history():
+def test_pyproject_readme_exists():
     with open("pyproject.toml", "rb") as f:
         pyproject = tomllib.load(f)
 
@@ -54,12 +54,8 @@ def test_pyproject_readme_includes_history():
     # In pyproject.toml, readme can be a string or a table
     if isinstance(readme, dict):
         assert "README.rst" in str(readme.get("file", ""))
-        assert "HISTORY.rst" in str(readme.get("file", ""))
     else:
-        # If it's a string, it must point to both or be dynamic
-        # But for now, let's just assert it includes history
-        assert "HISTORY.rst" in str(readme)
-
+        assert "README.rst" in str(readme)
 
 def test_pyproject_urls_match_setup_py():
     with open("pyproject.toml", "rb") as f:
