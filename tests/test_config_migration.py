@@ -69,6 +69,37 @@ def test_pyproject_urls_match_setup_py():
     project_urls = pyproject["project"].get("urls", {})
     assert project_urls.get("Homepage") == setup_url
 
+def test_pyproject_dependencies_match_setup_py():
+    with open("pyproject.toml", "rb") as f:
+        pyproject = tomllib.load(f)
+    
+    with open("setup.py", "r") as f:
+        content = f.read()
+    
+    match = re.search(r'requirements = \[(.*?)\]', content, re.DOTALL)
+    requirements_raw = match.group(1) if match else ""
+    setup_reqs = [r.strip().replace('"', '').replace("'", "").replace(",", "") 
+                  for r in requirements_raw.split("\n") if r.strip()]
+    
+    pyproject_reqs = pyproject["project"].get("dependencies", [])
+    
+    # Check if all setup.py requirements are present in pyproject.toml
+    # with correct version constraints
+    for req in setup_reqs:
+        # Match requirement name (e.g., numpy)
+        name = re.split(r'[<>=!]', req)[0].strip()
+        matching = [p for p in pyproject_reqs if p.startswith(name)]
+        assert matching, f"Dependency {name} missing from pyproject.toml"
+        assert matching[0] == req, f"Dependency {name} version mismatch: {matching[0]} != {req}"
+
+def test_pyproject_optional_dependencies_exist():
+    with open("pyproject.toml", "rb") as f:
+        pyproject = tomllib.load(f)
+    
+    optional_deps = pyproject["project"].get("optional-dependencies", {})
+    assert "dev" in optional_deps
+    assert "pytest" in str(optional_deps["dev"])
+
 def test_ruff_configured():
     with open("pyproject.toml", "rb") as f:
         pyproject = tomllib.load(f)
