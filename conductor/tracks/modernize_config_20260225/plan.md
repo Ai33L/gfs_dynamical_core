@@ -8,7 +8,7 @@
 
 ## Phase 2: Migration & Cleanup
 - [x] Task: Write tests to verify metadata extraction and package installation. aa23ee9
-- [ ] Task: Implement metadata migration to pyproject.toml.
+- [x] Task: Implement metadata migration to pyproject.toml. 9f62ea3
 - [ ] Task: Implement dependency migration to pyproject.toml.
 - [ ] Task: Conductor - User Manual Verification 'Migration & Cleanup' (Protocol in workflow.md)
 
