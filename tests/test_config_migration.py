@@ -103,4 +103,25 @@ def test_pyproject_optional_dependencies_exist():
 def test_ruff_configured():
     with open("pyproject.toml", "rb") as f:
         pyproject = tomllib.load(f)
-    assert "ruff" in pyproject.get("tool", {})
+    
+    ruff_config = pyproject.get("tool", {}).get("ruff", {})
+    assert ruff_config, "Ruff not configured in pyproject.toml"
+    
+    # Check lint rules
+    lint_config = ruff_config.get("lint", {})
+    select = lint_config.get("select", [])
+    assert "E4" in select
+    assert "E7" in select
+    assert "E9" in select
+    assert "F" in select
+    
+    # Check excludes
+    exclude = ruff_config.get("exclude", [])
+    assert "gfs_dynamical_core/_lib" in exclude
+    assert "docs" in exclude
+
+def test_ruff_runnable():
+    import subprocess
+    result = subprocess.run(["ruff", "--version"], capture_output=True, text=True)
+    assert result.returncode == 0
+    assert "ruff" in result.stdout.lower()
