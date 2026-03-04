@@ -73,4 +73,6 @@ target/
 # pyenv python configuration file
 .python-version
 
-.vscode/
+.vscode/.ipynb_checkpoints/
+.configured_fftw
+.configured_sht

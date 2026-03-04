@@ -42,10 +42,10 @@ requirements = [
     "numpy>=1.16.0",
     "pint>=0.7.0",
     "xarray>=0.8.0",
-    "sympl==0.5.0",
+    "sympl>=0.5.0",
     "cython>=0.25",
     "scipy>=0.18.1",
-    "climt==0.18.4",
+    "climt>=0.18.4",
 ]
 
 test_requirements = [
