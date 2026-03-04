@@ -13,7 +13,7 @@
 - [x] Task: Conductor - User Manual Verification 'Migration & Cleanup' (Protocol in workflow.md) 51f19f3
 
 ## Phase 3: Linting & Validation
-- [ ] Task: Write tests to verify Ruff configuration.
+- [x] Task: Write tests to verify Ruff configuration. c32fb25
 - [ ] Task: Run Ruff check and Ruff format on the entire codebase.
 - [ ] Task: Fix linting/formatting issues reported by Ruff.
 - [ ] Task: Verify final build and run all existing tests.
