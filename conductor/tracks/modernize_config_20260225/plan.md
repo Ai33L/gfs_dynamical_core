@@ -15,6 +15,6 @@
 ## Phase 3: Linting & Validation
 - [x] Task: Write tests to verify Ruff configuration. c32fb25
 - [x] Task: Run Ruff check and Ruff format on the entire codebase. a85a062
-- [ ] Task: Fix linting/formatting issues reported by Ruff.
+- [x] Task: Fix linting/formatting issues reported by Ruff. a85a062
 - [ ] Task: Verify final build and run all existing tests.
 - [ ] Task: Conductor - User Manual Verification 'Linting & Validation' (Protocol in workflow.md)
