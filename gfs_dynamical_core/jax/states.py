@@ -16,6 +16,8 @@ class GridState:
     u: jnp.ndarray # (levels, n_lat, n_lon)
     v: jnp.ndarray # (levels, n_lat, n_lon)
     temperature: jnp.ndarray # (levels, n_lat, n_lon)
+    vorticity: jnp.ndarray # (levels, n_lat, n_lon)
+    divergence: jnp.ndarray # (levels, n_lat, n_lon)
     log_surface_pressure: jnp.ndarray # (n_lat, n_lon)
     tracers: jnp.ndarray # (n_tracers, levels, n_lat, n_lon)
 
