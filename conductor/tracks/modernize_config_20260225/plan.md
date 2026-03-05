@@ -12,9 +12,9 @@
 - [x] Task: Implement dependency migration to pyproject.toml. 05a4562
 - [x] Task: Conductor - User Manual Verification 'Migration & Cleanup' (Protocol in workflow.md) 51f19f3
 
-## Phase 3: Linting & Validation
+## Phase 3: Linting & Validation [checkpoint: eed5a7d]
 - [x] Task: Write tests to verify Ruff configuration. c32fb25
 - [x] Task: Run Ruff check and Ruff format on the entire codebase. a85a062
 - [x] Task: Fix linting/formatting issues reported by Ruff. a85a062
 - [x] Task: Verify final build and run all existing tests. b25e0d5
-- [ ] Task: Conductor - User Manual Verification 'Linting & Validation' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Linting & Validation' (Protocol in workflow.md) eed5a7d
