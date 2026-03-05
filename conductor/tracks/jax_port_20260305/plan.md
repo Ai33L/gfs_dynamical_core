@@ -13,11 +13,11 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Spectral Transform Layer (S2FFT)' (Protocol in workflow.md) 0e8d42c
 
 ## Phase 3: Grid-Space Dynamics Porting
-- [ ] Task: Port pressure diagnostics (`compute_pressure_diagnostics`) from Fortran to pure JAX.
-- [ ] Task: Port vertical velocity and surface pressure tendency logic (`compute_vertical_velocities`).
-- [ ] Task: Port vertical advection and pressure gradient force logic.
-- [ ] Task: Port energy conversion and final tendency assembly.
-- [ ] Task: Write Tests: Unit tests for each pure function using a combination of synthetic inputs and legacy Fortran intermediate outputs.
+- [x] Task: Port pressure diagnostics (`compute_pressure_diagnostics`) from Fortran to pure JAX. eff83a8
+- [x] Task: Port vertical velocity and surface pressure tendency logic (`compute_vertical_velocities`). a256da0
+- [x] Task: Port vertical advection and pressure gradient force logic. c8757f9
+- [x] Task: Port energy conversion and final tendency assembly. d1b92f0
+- [x] Task: Write Tests: Unit tests for each pure function using a combination of synthetic inputs and legacy Fortran intermediate outputs. d1b92f0
 - [ ] Task: Conductor - User Manual Verification 'Phase 3: Grid-Space Dynamics Porting' (Protocol in workflow.md)
 
 ## Phase 4: Sympl Component Integration
