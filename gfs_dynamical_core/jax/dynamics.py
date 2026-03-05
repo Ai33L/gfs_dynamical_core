@@ -10,7 +10,7 @@ class DynamicsConfig:
     bk: jnp.ndarray # (n_lev + 1,)
     ck: jnp.ndarray # (n_lev,) - ak(k+1)*bk(k)-ak(k)*bk(k+1)
     dbk: jnp.ndarray # (n_lev,) - bk(k+1)-bk(k)
-    rk: float # R / Cp
+    rk: float # R / Cp (kappa)
     toa_pressure: float # Top of atmosphere pressure
     radius: float
     omega: float
@@ -36,6 +36,16 @@ class VerticalVelocities:
     omega: jnp.ndarray # (n_lev, n_lat, n_lon) - d(ln p)/dt on layers
     etadot: jnp.ndarray # (n_lev + 1, n_lat, n_lon) - eta dot on interfaces
     d_log_ps_d_t: jnp.ndarray # (n_lat, n_lon) - surface pressure tendency
+
+@struct.dataclass
+class GridTendencies:
+    """Tendencies in grid space before transformation to spectral."""
+    u_flux: jnp.ndarray # ug * (zeta + f) + v_flux_term
+    v_flux: jnp.ndarray # vg * (zeta + f) - u_flux_term
+    temp_tend: jnp.ndarray 
+    log_ps_tend: jnp.ndarray
+    tracer_tends: jnp.ndarray
+    kinetic_energy: jnp.ndarray # 0.5 * (u^2 + v^2)
 
 def compute_pressure_diagnostics(log_ps: jnp.ndarray, config: DynamicsConfig) -> PressureDiagnostics:
     """Computes pressure-related diagnostics."""
@@ -77,39 +87,15 @@ def compute_vertical_velocities(
     return VerticalVelocities(omega=omega, etadot=etadot, d_log_ps_d_t=d_log_ps_d_t)
 
 def compute_vertical_advection(data: jnp.ndarray, etadot: jnp.ndarray, dp: jnp.ndarray) -> jnp.ndarray:
-    """
-    Computes vertical advection using second-order centered differences.
-    Equivalent to Fortran's getvadv.
-    """
+    """Computes vertical advection using second-order centered differences."""
     n_lev = data.shape[0]
-    
-    # Fortran logic (bottom-to-top):
-    # vadv(nlevs) = (0.5/dp(1)) * etadot(2) * (data(nlevs-1) - data(nlevs))
-    # vadv(1) = (0.5/dp(nlevs)) * etadot(nlevs) * (data(1) - data(2))
-    # vadv(k) = (0.5/dp(k)) * (etadot(k+1)*(data(k-1)-data(k)) + etadot(k)*(data(k)-data(k+1)))
-    
-    # Converting to top-to-bottom JAX indexing (k=0 is top):
-    # data[0] is top layer, etadot[0] is TOA (0), etadot[1] is first interface.
-    # etadot[n_lev] is bottom interface (0).
-    
-    # Boundary: Top layer (k=0)
     vadv_top = (0.5 / dp[0]) * etadot[1] * (data[1] - data[0])
-    
-    # Boundary: Bottom layer (k=n_lev-1)
     vadv_bot = (0.5 / dp[-1]) * etadot[-2] * (data[-2] - data[-1])
-    
-    # Interior
-    # vadv[k] = (0.5/dp[k]) * (etadot[k+1]*(data[k+1]-data[k]) + etadot[k]*(data[k]-data[k-1]))
-    # Note: data[k+1] is "below" in top-to-bottom.
-    # Fortran: etadot(k+1)*(data(k-1)-data(k)) -- data(k-1) is "below" in bottom-to-top.
-    # So (data[k+1]-data[k]) is correct for top-to-bottom.
-    
     k = jnp.arange(1, n_lev - 1)
     vadv_mid = (0.5 / dp[1:-1]) * (
         etadot[2:-1] * (data[2:] - data[1:-1]) + 
         etadot[1:-2] * (data[1:-1] - data[:-2])
     )
-    
     return jnp.concatenate([vadv_top[None], vadv_mid, vadv_bot[None]], axis=0)
 
 def compute_pressure_gradient_force(
@@ -119,46 +105,88 @@ def compute_pressure_gradient_force(
     config: DynamicsConfig,
     surface_geopotential_grads: tuple[jnp.ndarray, jnp.ndarray]
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """
-    Computes horizontal pressure gradient force components.
-    Equivalent to Fortran's getpresgrad.
-    """
+    """Computes horizontal pressure gradient force components."""
     rd = config.rd
     ps = press_diag.ps
     dlnpsdx = grid_grads.d_log_ps_d_lambda
     dlnpsdy = grid_grads.d_log_ps_d_phi
     dphisdx, dphisdy = surface_geopotential_grads
-    
-    # cofa(k) = ak(k+1)*bk(k) - ak(k)*bk(k+1) / (ps * dbk(k)) -- wait, cofa is more complex
-    # Let's re-read getpresgrad cofa/cofb logic.
-    # cofb(:,:,1)=-(1./dpk(:,:,1))*(alfa(:,:,1)*dbk(1))
-    # cofa(:,:,1)=-(1./(psg(:,:)*dpk(:,:,1)))*(alfa(:,:,1)*ck(1))
-    
-    # 표준화된 TOP-TO-BOTTOM indexing
     cofb = -(1.0 / press_diag.dp) * (press_diag.alfa * config.dbk[:, None, None])
     cofa = -(1.0 / (ps[None, :, :] * press_diag.dp)) * (press_diag.alfa * config.ck[:, None, None])
-    
-    # px3 terms (summation)
-    # Fortran: px3u(:,:,nlevs-k)=px3u(:,:,nlevs+1-k)-rd*rlnp(:,:,nlevs+1-k)*dvirtempdx(:,:,k)
-    # This is a cumulative sum from bottom to top.
-    # In top-to-bottom, it's a cumulative sum from bottom upwards.
-    
-    term_x = rd * press_diag.rlnp * grid_grads.d_t_d_lambda # Note: d_t_d_lambda should be virtual temp grad
+    term_x = rd * press_diag.rlnp * grid_grads.d_t_d_lambda
     term_y = rd * press_diag.rlnp * grid_grads.d_t_d_phi
-    
-    # Flip, cumsum, flip back to get bottom-up sum
     px3u = jnp.flip(jnp.cumsum(jnp.flip(term_x, axis=0), axis=0), axis=0)
     px3v = jnp.flip(jnp.cumsum(jnp.flip(term_y, axis=0), axis=0), axis=0)
-    
-    # PGF = -grad(phi) - rd * T_v * grad(ln p)
-    # The Fortran code assembles it into prsgx/y
-    
     pgf_x = -dphisdx[None, :, :] + cofb * ps[None, :, :] * dlnpsdx[None, :, :] + px3u - \
             rd * press_diag.alfa * grid_grads.d_t_d_lambda - \
             cofa * rd * virtual_temp * ps[None, :, :] * dlnpsdx[None, :, :]
-            
     pgf_y = -dphisdy[None, :, :] + cofb * ps[None, :, :] * dlnpsdy[None, :, :] + px3v - \
             rd * press_diag.alfa * grid_grads.d_t_d_phi - \
             cofa * rd * virtual_temp * ps[None, :, :] * dlnpsdy[None, :, :]
-            
     return pgf_x, pgf_y
+
+def compute_energy_conversion(
+    omega: jnp.ndarray, 
+    virtual_temp: jnp.ndarray, 
+    specific_humidity: jnp.ndarray, 
+    config: DynamicsConfig
+) -> jnp.ndarray:
+    """
+    Computes thermodynamic energy conversion term (kappa * omega * Tv / pressure).
+    Note: omega input here is already divided by pressure (dlnp/dt).
+    """
+    term = 1.0 + (config.cvap / config.cp - 1.0) * specific_humidity
+    return config.rk * omega * virtual_temp / term
+
+def assemble_grid_tendencies(
+    grid_state: GridState,
+    grid_grads: GridGradients,
+    vvels: VerticalVelocities,
+    press_diag: PressureDiagnostics,
+    pgf: tuple[jnp.ndarray, jnp.ndarray],
+    energy_conv: jnp.ndarray,
+    config: DynamicsConfig,
+    latitudes: jnp.ndarray
+) -> GridTendencies:
+    """
+    Assembles all grid-space tendencies before they are transformed back to spectral.
+    """
+    u, v = grid_state.u, grid_state.v
+    vort = grid_state.vorticity
+    pgf_x, pgf_y = pgf
+    
+    # 1. Vertical advection of u, v, T
+    vadv_u = compute_vertical_advection(u, vvels.etadot, press_diag.dp)
+    vadv_v = compute_vertical_advection(v, vvels.etadot, press_diag.dp)
+    vadv_t = compute_vertical_advection(grid_state.temperature, vvels.etadot, press_diag.dp)
+    
+    # 2. Planetary vorticity (f = 2 * omega * sin(lat))
+    f = 2.0 * config.omega * jnp.sin(latitudes)
+    
+    # 3. Momentum flux terms
+    abs_vort = vort + f[None, :, None]
+    u_flux = u * abs_vort + (vadv_v - pgf_y)
+    v_flux = v * abs_vort - (vadv_u - pgf_x)
+    
+    # 4. Temperature tendency
+    temp_tend = -u * grid_grads.d_t_d_lambda - v * grid_grads.d_t_d_phi - vadv_t + energy_conv
+    
+    # 5. Tracer tendencies
+    def compute_tracer_tend(q):
+        vadv_q = compute_vertical_advection(q, vvels.etadot, press_diag.dp)
+        # Assuming zero horizontal tracer gradients for now as they are not in GridGradients yet
+        return -vadv_q
+        
+    tracer_tends = jax.vmap(compute_tracer_tend)(grid_state.tracers)
+    
+    # 6. Kinetic Energy
+    ke = 0.5 * (u**2 + v**2)
+    
+    return GridTendencies(
+        u_flux=u_flux,
+        v_flux=v_flux,
+        temp_tend=temp_tend,
+        log_ps_tend=vvels.d_log_ps_d_t,
+        tracer_tends=tracer_tends,
+        kinetic_energy=ke
+    )
