@@ -5,45 +5,40 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from gfs_dynamical_core.jax.dynamics import (
-    compute_pressure_diagnostics, compute_vertical_velocities, DynamicsConfig
+    compute_pressure_diagnostics, compute_vertical_velocities, 
+    compute_vertical_advection, compute_pressure_gradient_force, DynamicsConfig
 )
 from gfs_dynamical_core.jax.states import GridState, GridGradients
 
-def test_pressure_diagnostics():
-    n_lev = 10
-    n_lat, n_lon = 32, 64
-    
-    # Mock ak, bk (linear for simplicity)
-    # GFS hybrid coordinates: ak[top]=0, ak[bot]=0, bk[top]=0, bk[bot]=1
+def get_mock_config(n_lev):
     ak = jnp.zeros(n_lev + 1)
     bk = jnp.linspace(0, 1, n_lev + 1)
     dbk = bk[1:] - bk[:-1]
     ck = ak[1:] * bk[:-1] - ak[:-1] * bk[1:]
     
-    config = DynamicsConfig(
+    return DynamicsConfig(
         ak=ak, bk=bk, ck=ck, dbk=dbk,
         rk=0.286, toa_pressure=0.0,
         radius=6.371e6, omega=7.292e-5, g=9.81,
         rd=287.0, rv=461.0, cp=1004.0, cvap=1810.0
     )
-    
+
+def test_pressure_diagnostics():
+    n_lev = 10
+    n_lat, n_lon = 32, 64
+    config = get_mock_config(n_lev)
     log_ps = jnp.full((n_lat, n_lon), jnp.log(101325.0))
     
     diag = compute_pressure_diagnostics(log_ps, config)
     
-    # Verify shapes
     assert diag.ps.shape == (n_lat, n_lon)
     assert diag.pk.shape == (n_lev + 1, n_lat, n_lon)
     assert diag.dp.shape == (n_lev, n_lat, n_lon)
     assert diag.prs.shape == (n_lev, n_lat, n_lon)
     
-    # Verify surface pressure matches (last interface)
     np.testing.assert_allclose(diag.pk[-1], diag.ps, atol=1e-8)
-    
-    # Verify pk[0] is ak[0] (if toa_pressure=0)
     np.testing.assert_allclose(diag.pk[0], config.ak[0], atol=1e-8)
     
-    # JIT check
     jit_func = jax.jit(compute_pressure_diagnostics)
     diag_jit = jit_func(log_ps, config)
     np.testing.assert_allclose(diag_jit.prs, diag.prs)
@@ -51,24 +46,10 @@ def test_pressure_diagnostics():
 def test_vertical_velocities():
     n_lev = 10
     n_lat, n_lon = 32, 64
-    
-    # Mock coefficients
-    ak = jnp.zeros(n_lev + 1)
-    bk = jnp.linspace(0, 1, n_lev + 1)
-    dbk = bk[1:] - bk[:-1]
-    ck = ak[1:] * bk[:-1] - ak[:-1] * bk[1:]
-    
-    config = DynamicsConfig(
-        ak=ak, bk=bk, ck=ck, dbk=dbk,
-        rk=0.286, toa_pressure=0.0,
-        radius=6.371e6, omega=7.292e-5, g=9.81,
-        rd=287.0, rv=461.0, cp=1004.0, cvap=1810.0
-    )
-    
+    config = get_mock_config(n_lev)
     log_ps = jnp.full((n_lat, n_lon), jnp.log(101325.0))
     diag = compute_pressure_diagnostics(log_ps, config)
     
-    # Grid state with zero winds/div initially
     grid_state = GridState(
         u=jnp.zeros((n_lev, n_lat, n_lon)),
         v=jnp.zeros((n_lev, n_lat, n_lon)),
@@ -88,17 +69,47 @@ def test_vertical_velocities():
     
     vvels = compute_vertical_velocities(grid_state, grid_grads, diag, config)
     
-    # With zero divergence and zero winds, all vertical velocities and tendencies should be zero
     np.testing.assert_allclose(vvels.d_log_ps_d_t, 0.0, atol=1e-12)
     np.testing.assert_allclose(vvels.etadot, 0.0, atol=1e-12)
     np.testing.assert_allclose(vvels.omega, 0.0, atol=1e-12)
     
-    # Test with constant divergence
     grid_state = grid_state.replace(divergence=jnp.full_like(grid_state.divergence, 1e-6))
     vvels = compute_vertical_velocities(grid_state, grid_grads, diag, config)
     
-    # dlnps/dt should be non-zero
     assert jnp.any(vvels.d_log_ps_d_t != 0.0)
-    # etadot at top and bottom should be 0
     np.testing.assert_allclose(vvels.etadot[0], 0.0, atol=1e-12)
     np.testing.assert_allclose(vvels.etadot[-1], 0.0, atol=1e-12)
+
+def test_vertical_advection():
+    n_lev = 10
+    n_lat, n_lon = 32, 64
+    data = jnp.stack([jnp.full((n_lat, n_lon), float(k)) for k in range(n_lev)])
+    etadot = jnp.full((n_lev + 1, n_lat, n_lon), 0.1)
+    etadot = etadot.at[0].set(0.0)
+    etadot = etadot.at[-1].set(0.0)
+    dp = jnp.full((n_lev, n_lat, n_lon), 1000.0)
+    
+    vadv = compute_vertical_advection(data, etadot, dp)
+    assert vadv.shape == (n_lev, n_lat, n_lon)
+    np.testing.assert_allclose(vadv[1:-1], 1e-4, atol=1e-12)
+
+def test_pressure_gradient_force():
+    n_lev = 10
+    n_lat, n_lon = 32, 64
+    config = get_mock_config(n_lev)
+    log_ps = jnp.full((n_lat, n_lon), jnp.log(101325.0))
+    diag = compute_pressure_diagnostics(log_ps, config)
+    
+    virtual_temp = jnp.full((n_lev, n_lat, n_lon), 280.0)
+    grid_grads = GridGradients(
+        d_log_ps_d_phi=jnp.zeros((n_lat, n_lon)),
+        d_log_ps_d_lambda=jnp.zeros((n_lat, n_lon)),
+        d_t_d_phi=jnp.zeros((n_lev, n_lat, n_lon)),
+        d_t_d_lambda=jnp.zeros((n_lev, n_lat, n_lon))
+    )
+    phis_grads = (jnp.zeros((n_lat, n_lon)), jnp.zeros((n_lat, n_lon)))
+    
+    pgf_x, pgf_y = compute_pressure_gradient_force(virtual_temp, grid_grads, diag, config, phis_grads)
+    
+    np.testing.assert_allclose(pgf_x, 0.0, atol=1e-12)
+    np.testing.assert_allclose(pgf_y, 0.0, atol=1e-12)
