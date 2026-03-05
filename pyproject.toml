@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gfs_dynamical_core"
-version = "0.2.0"
+version = "0.3.0"
 description = "Only the dynamical core of the climt repository"
 readme = "README.rst"
 authors = [

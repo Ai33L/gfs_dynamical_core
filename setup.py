@@ -181,7 +181,7 @@ class gfs_bdist_wheel(native_bdist_wheel):
 
 setup(
     name="gfs_dynamical_core",
-    version="0.2.0",
+    version="0.3.0",
     description="Only the dynamical core of the climt repository",
     long_description=readme + "\n\n" + history,
     author="Abel Shibu",
