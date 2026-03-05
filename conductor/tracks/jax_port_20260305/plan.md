@@ -6,11 +6,11 @@
 - [x] Task: Implement `SpectralState` and `GridState` immutable containers using `flax.struct` to support JAX transformations. d196a72
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Environment & Foundations' (Protocol in workflow.md) e4440f4
 
-## Phase 2: Spectral Transform Layer (S2FFT)
+## Phase 2: Spectral Transform Layer (S2FFT) [checkpoint: 0e8d42c]
 - [x] Task: Implement forward and backward transforms using `S2FFT` for GFS grid configurations. cc3a1a8
 - [x] Task: Write Tests: Verify identity transform (Spectral -> Grid -> Spectral) for arbitrary fields. e07e2f9
 - [x] Task: Implement batching for transforms to handle multiple vertical levels simultaneously. b98acac
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Spectral Transform Layer (S2FFT)' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Spectral Transform Layer (S2FFT)' (Protocol in workflow.md) 0e8d42c
 
 ## Phase 3: Grid-Space Dynamics Porting
 - [ ] Task: Port pressure diagnostics (`compute_pressure_diagnostics`) from Fortran to pure JAX.
