@@ -29,7 +29,7 @@ def spectral_to_grid(spec_state: SpectralState, config: TransformConfig) -> tupl
     
     def transform_level(vort, div, temp, tracers):
         # 1. Scalar transforms
-        grid_t = s2fft.inverse(temp, L, sampling=sampling)
+        grid_t = s2fft.inverse(temp, L, sampling=sampling, method="jax")
         
         # 2. Vector transforms (vort, div -> u, v)
         # Note: s2fft handles this via spin-1 transforms
@@ -38,7 +38,7 @@ def spectral_to_grid(spec_state: SpectralState, config: TransformConfig) -> tupl
         grid_v = jnp.zeros_like(grid_t)
         
         # 3. Tracers
-        grid_tracers = jax.vmap(lambda flm: s2fft.inverse(flm, L, sampling=sampling))(tracers)
+        grid_tracers = jax.vmap(lambda flm: s2fft.inverse(flm, L, sampling=sampling, method="jax"))(tracers)
         
         return grid_u, grid_v, grid_t, grid_tracers
 
@@ -51,7 +51,7 @@ def spectral_to_grid(spec_state: SpectralState, config: TransformConfig) -> tupl
     )
     
     # 4. Surface pressure
-    grid_lnps = s2fft.inverse(spec_state.log_surface_pressure, L, sampling=sampling)
+    grid_lnps = s2fft.inverse(spec_state.log_surface_pressure, L, sampling=sampling, method="jax")
     
     grid_state = GridState(
         u=grid_u,
@@ -81,14 +81,14 @@ def grid_to_spectral(grid_tendencies: GridState, config: TransformConfig) -> Spe
     
     def forward_level(u, v, t, tracers):
         # Forward scalar
-        flm_t = s2fft.forward(t, L, sampling=sampling)
+        flm_t = s2fft.forward(t, L, sampling=sampling, method="jax")
         
         # Forward vector (u, v -> vort, div)
         flm_vort = jnp.zeros_like(flm_t)
         flm_div = jnp.zeros_like(flm_t)
         
         # Tracers
-        flm_tracers = jax.vmap(lambda f: s2fft.forward(f, L, sampling=sampling))(tracers)
+        flm_tracers = jax.vmap(lambda f: s2fft.forward(f, L, sampling=sampling, method="jax"))(tracers)
         
         return flm_vort, flm_div, flm_t, flm_tracers
 
@@ -99,7 +99,7 @@ def grid_to_spectral(grid_tendencies: GridState, config: TransformConfig) -> Spe
         grid_tendencies.tracers.transpose(1, 0, 2, 3)
     )
     
-    flm_lnps = s2fft.forward(grid_tendencies.log_surface_pressure, L, sampling=sampling)
+    flm_lnps = s2fft.forward(grid_tendencies.log_surface_pressure, L, sampling=sampling, method="jax")
     
     spec_tend = SpectralState(
         vorticity=flm_vort,

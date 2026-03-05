@@ -1,3 +1,6 @@
+from jax import config
+config.update("jax_enable_x64", True)
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -17,7 +20,7 @@ def test_spectral_identity():
     # Generate random spectral temperature for multiple levels
     rng = np.random.default_rng(0)
     # sg.generate_flm doesn't support batching directly, so we vmap or loop
-    temp_spec = jnp.stack([jnp.array(sg.generate_flm(rng, L)) for _ in range(n_lev)])
+    temp_spec = jnp.stack([jnp.array(sg.generate_flm(rng, L, reality=False)) for _ in range(n_lev)])
     
     # Empty others
     vort = jnp.zeros_like(temp_spec)
@@ -46,5 +49,5 @@ def test_spectral_identity():
     np.testing.assert_allclose(
         recovered_spec.temperature, 
         spec_state.temperature, 
-        atol=1e-4, rtol=1e-4
+        atol=1e-12, rtol=1e-12
     )

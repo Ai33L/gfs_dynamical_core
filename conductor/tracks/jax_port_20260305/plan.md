@@ -7,9 +7,9 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Environment & Foundations' (Protocol in workflow.md) e4440f4
 
 ## Phase 2: Spectral Transform Layer (S2FFT)
-- [ ] Task: Implement forward and backward transforms using `S2FFT` for GFS grid configurations.
-- [ ] Task: Write Tests: Verify identity transform (Spectral -> Grid -> Spectral) for arbitrary fields.
-- [ ] Task: Implement batching for transforms to handle multiple vertical levels simultaneously.
+- [x] Task: Implement forward and backward transforms using `S2FFT` for GFS grid configurations. cc3a1a8
+- [x] Task: Write Tests: Verify identity transform (Spectral -> Grid -> Spectral) for arbitrary fields. e07e2f9
+- [x] Task: Implement batching for transforms to handle multiple vertical levels simultaneously. b98acac
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Spectral Transform Layer (S2FFT)' (Protocol in workflow.md)
 
 ## Phase 3: Grid-Space Dynamics Porting
