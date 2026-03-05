@@ -1,10 +1,10 @@
 # Implementation Plan: JAX Port of GFS Dynamical Core
 
-## Phase 1: Environment & Foundations
+## Phase 1: Environment & Foundations [checkpoint: e4440f4]
 - [x] Task: Install dependencies (`jax`, `jaxlib`, `s2fft`, `flax`). 3382dfc
 - [x] Task: Create module structure: `gfs_dynamical_core/jax/` with `states.py`, `transforms.py`, and `dynamics.py`. 115dda9
 - [x] Task: Implement `SpectralState` and `GridState` immutable containers using `flax.struct` to support JAX transformations. d196a72
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Environment & Foundations' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Environment & Foundations' (Protocol in workflow.md) e4440f4
 
 ## Phase 2: Spectral Transform Layer (S2FFT)
 - [ ] Task: Implement forward and backward transforms using `S2FFT` for GFS grid configurations.
