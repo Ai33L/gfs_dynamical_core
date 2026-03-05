@@ -4,11 +4,11 @@ import jax.numpy as jnp
 @struct.dataclass
 class SpectralState:
     """State of the dynamical core in spectral space."""
-    vorticity: jnp.ndarray  # (levels, n_spec)
-    divergence: jnp.ndarray # (levels, n_spec)
-    temperature: jnp.ndarray # (levels, n_spec)
-    log_surface_pressure: jnp.ndarray # (n_spec,)
-    tracers: jnp.ndarray # (n_tracers, levels, n_spec)
+    vorticity: jnp.ndarray  # (levels, L, 2*L-1)
+    divergence: jnp.ndarray # (levels, L, 2*L-1)
+    temperature: jnp.ndarray # (levels, L, 2*L-1)
+    log_surface_pressure: jnp.ndarray # (L, 2*L-1)
+    tracers: jnp.ndarray # (n_tracers, levels, L, 2*L-1)
 
 @struct.dataclass
 class GridState:
