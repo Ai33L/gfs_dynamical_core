@@ -1,7 +1,8 @@
 import jax
 import jax.numpy as jnp
 from flax import struct
-from .states import GridState, GridGradients
+from .states import GridState, GridGradients, SpectralState, SpectralTendencies
+from .transforms import spectral_to_grid, grid_to_spectral_tendencies, TransformConfig
 
 @struct.dataclass
 class DynamicsConfig:
@@ -131,10 +132,7 @@ def compute_energy_conversion(
     specific_humidity: jnp.ndarray, 
     config: DynamicsConfig
 ) -> jnp.ndarray:
-    """
-    Computes thermodynamic energy conversion term (kappa * omega * Tv / pressure).
-    Note: omega input here is already divided by pressure (dlnp/dt).
-    """
+    """Computes thermodynamic energy conversion term."""
     term = 1.0 + (config.cvap / config.cp - 1.0) * specific_humidity
     return config.rk * omega * virtual_temp / term
 
@@ -148,45 +146,53 @@ def assemble_grid_tendencies(
     config: DynamicsConfig,
     latitudes: jnp.ndarray
 ) -> GridTendencies:
-    """
-    Assembles all grid-space tendencies before they are transformed back to spectral.
-    """
+    """Assembles all grid-space tendencies."""
     u, v = grid_state.u, grid_state.v
     vort = grid_state.vorticity
     pgf_x, pgf_y = pgf
-    
-    # 1. Vertical advection of u, v, T
     vadv_u = compute_vertical_advection(u, vvels.etadot, press_diag.dp)
     vadv_v = compute_vertical_advection(v, vvels.etadot, press_diag.dp)
     vadv_t = compute_vertical_advection(grid_state.temperature, vvels.etadot, press_diag.dp)
-    
-    # 2. Planetary vorticity (f = 2 * omega * sin(lat))
     f = 2.0 * config.omega * jnp.sin(latitudes)
-    
-    # 3. Momentum flux terms
     abs_vort = vort + f[None, :, None]
     u_flux = u * abs_vort + (vadv_v - pgf_y)
     v_flux = v * abs_vort - (vadv_u - pgf_x)
-    
-    # 4. Temperature tendency
     temp_tend = -u * grid_grads.d_t_d_lambda - v * grid_grads.d_t_d_phi - vadv_t + energy_conv
-    
-    # 5. Tracer tendencies
     def compute_tracer_tend(q):
         vadv_q = compute_vertical_advection(q, vvels.etadot, press_diag.dp)
-        # Assuming zero horizontal tracer gradients for now as they are not in GridGradients yet
         return -vadv_q
-        
     tracer_tends = jax.vmap(compute_tracer_tend)(grid_state.tracers)
-    
-    # 6. Kinetic Energy
     ke = 0.5 * (u**2 + v**2)
-    
     return GridTendencies(
-        u_flux=u_flux,
-        v_flux=v_flux,
-        temp_tend=temp_tend,
-        log_ps_tend=vvels.d_log_ps_d_t,
-        tracer_tends=tracer_tends,
+        u_flux=u_flux, v_flux=v_flux, temp_tend=temp_tend,
+        log_ps_tend=vvels.d_log_ps_d_t, tracer_tends=tracer_tends,
         kinetic_energy=ke
     )
+
+def full_dynamics_step(
+    grid_state: GridState,
+    grid_grads: GridGradients,
+    phis_grads: tuple[jnp.ndarray, jnp.ndarray],
+    config: DynamicsConfig,
+    latitudes: jnp.ndarray
+) -> GridTendencies:
+    """Performs a full dynamical core step in grid space."""
+    press_diag = compute_pressure_diagnostics(grid_state.log_surface_pressure, config)
+    vvels = compute_vertical_velocities(grid_state, grid_grads, press_diag, config)
+    pgf = compute_pressure_gradient_force(grid_state.temperature, grid_grads, press_diag, config, phis_grads)
+    energy_conv = compute_energy_conversion(vvels.omega, grid_state.temperature, grid_state.tracers[0], config)
+    tends = assemble_grid_tendencies(grid_state, grid_grads, vvels, press_diag, pgf, energy_conv, config, latitudes)
+    return tends
+
+def get_spectral_tendencies(
+    spec_state: SpectralState,
+    phis_grads: tuple[jnp.ndarray, jnp.ndarray],
+    dyn_config: DynamicsConfig,
+    trans_config: TransformConfig,
+    latitudes: jnp.ndarray
+) -> SpectralTendencies:
+    """Computes spectral tendencies from spectral state (equivalent to getdyntend)."""
+    grid_state, grid_grads = spectral_to_grid(spec_state, trans_config)
+    grid_tends = full_dynamics_step(grid_state, grid_grads, phis_grads, dyn_config, latitudes)
+    spec_tends = grid_to_spectral_tendencies(grid_tends, trans_config)
+    return spec_tends

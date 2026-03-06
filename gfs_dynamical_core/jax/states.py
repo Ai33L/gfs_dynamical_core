@@ -28,3 +28,12 @@ class GridGradients:
     d_log_ps_d_lambda: jnp.ndarray # (n_lat, n_lon)
     d_t_d_phi: jnp.ndarray # (levels, n_lat, n_lon)
     d_t_d_lambda: jnp.ndarray # (levels, n_lat, n_lon)
+
+@struct.dataclass
+class SpectralTendencies:
+    """Tendencies of state variables in spectral space."""
+    d_vorticity_d_t: jnp.ndarray # (levels, L, 2*L-1)
+    d_divergence_d_t: jnp.ndarray # (levels, L, 2*L-1)
+    d_temperature_d_t: jnp.ndarray # (levels, L, 2*L-1)
+    d_log_surface_pressure_d_t: jnp.ndarray # (L, 2*L-1)
+    d_tracers_d_t: jnp.ndarray # (n_tracers, levels, L, 2*L-1)
