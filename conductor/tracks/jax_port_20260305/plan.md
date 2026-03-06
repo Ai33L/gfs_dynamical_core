@@ -21,14 +21,14 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 3: Grid-Space Dynamics Porting' (Protocol in workflow.md) 589e78c
 
 ## Phase 4: Sympl Component Integration
-- [ ] Task: Implement `GFSDynamicsJAX` in `gfs_dynamical_core/component_jax.py` inheriting from `sympl.Stepper`.
-- [ ] Task: Implement `__call__` (or `step`) to orchestrate the mapping between Sympl dictionaries and JAX containers.
-- [ ] Task: Implement input/output mapping for Sympl/CliMT dictionaries.
-- [ ] Task: Write Tests: Verify component initialization and basic Sympl integration.
-- [ ] Task: Conductor - User Manual Verification 'Phase 4: Sympl Component Integration' (Protocol in workflow.md)
+- [x] Task: Implement `GFSDynamicsJAX` in `gfs_dynamical_core/component_jax.py` inheriting from `sympl.Stepper`. a52d276
+- [x] Task: Implement `__call__` (or `step`) to orchestrate the mapping between Sympl dictionaries and JAX containers. a52d276
+- [x] Task: Implement input/output mapping for Sympl/CliMT dictionaries. a52d276
+- [x] Task: Write Tests: Verify component initialization and basic Sympl integration. a52d276
+- [x] Task: Conductor - User Manual Verification 'Phase 4: Sympl Component Integration' (Protocol in workflow.md) 46abebc
 
 ## Phase 5: End-to-End Validation & Verification
-- [ ] Task: Develop a validation script to compare `GFSDynamicsJAX` output tendencies against the legacy Fortran version.
-- [ ] Task: Verify numerical accuracy (matching within specified tolerance) for a full dynamics step.
-- [ ] Task: Verify `jax.jit` compatibility and differentiability of the entire component.
+- [x] Task: Develop a validation script to compare `GFSDynamicsJAX` output tendencies against the legacy Fortran version. 9642b3b
+- [x] Task: Verify numerical accuracy (matching within specified tolerance) for a full dynamics step. 9642b3b
+- [x] Task: Verify `jax.jit` compatibility and differentiability of the entire component. 46abebc
 - [ ] Task: Conductor - User Manual Verification 'Phase 5: End-to-End Validation & Verification' (Protocol in workflow.md)

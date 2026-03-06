@@ -6,8 +6,8 @@ import jax.numpy as jnp
 import numpy as np
 import s2fft
 import s2fft.utils.signal_generator as sg
-from gfs_dynamical_core.jax.states import SpectralState
-from gfs_dynamical_core.jax.transforms import TransformConfig, spectral_to_grid, grid_to_spectral
+from gfs_dynamical_core.jax.states import SpectralState, GridState
+from gfs_dynamical_core.jax.transforms import TransformConfig, spectral_to_grid, grid_to_spectral_tendencies
 
 def test_spectral_identity():
     # Use small L for testing
@@ -43,11 +43,24 @@ def test_spectral_identity():
     assert grid_state.temperature.shape == (n_lev, n_lat, n_lon)
     
     # Backward: Grid -> Spectral
-    recovered_spec = grid_to_spectral(grid_state, config)
+    # We need a mock GridTendencies object or just use the field directly if we had a pure scalar transform
+    # Since grid_to_spectral_tendencies expects a GridTendencies object, we'll mock it.
+    from gfs_dynamical_core.jax.dynamics import GridTendencies
+    
+    grid_tends = GridTendencies(
+        u_flux=grid_state.u,
+        v_flux=grid_state.v,
+        temp_tend=grid_state.temperature,
+        log_ps_tend=grid_state.log_surface_pressure,
+        tracer_tends=grid_state.tracers,
+        kinetic_energy=jnp.zeros_like(grid_state.u)
+    )
+    
+    recovered_spec = grid_to_spectral_tendencies(grid_tends, config)
     
     # Verify temperature round-trip
     np.testing.assert_allclose(
-        recovered_spec.temperature, 
+        recovered_spec.d_temperature_d_t, 
         spec_state.temperature, 
         atol=1e-12, rtol=1e-12
     )
