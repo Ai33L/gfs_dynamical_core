@@ -27,8 +27,8 @@
 - [x] Task: Write Tests: Verify component initialization and basic Sympl integration. a52d276
 - [x] Task: Conductor - User Manual Verification 'Phase 4: Sympl Component Integration' (Protocol in workflow.md) 46abebc
 
-## Phase 5: End-to-End Validation & Verification
+## Phase 5: End-to-End Validation & Verification [checkpoint: bb7e24f]
 - [x] Task: Develop a validation script to compare `GFSDynamicsJAX` output tendencies against the legacy Fortran version. 9642b3b
 - [x] Task: Verify numerical accuracy (matching within specified tolerance) for a full dynamics step. 9642b3b
 - [x] Task: Verify `jax.jit` compatibility and differentiability of the entire component. 46abebc
-- [ ] Task: Conductor - User Manual Verification 'Phase 5: End-to-End Validation & Verification' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 5: End-to-End Validation & Verification' (Protocol in workflow.md) bb7e24f
