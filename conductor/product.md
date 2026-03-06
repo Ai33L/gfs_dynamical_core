@@ -18,6 +18,8 @@ To provide a modular, easy-to-use, and highly accessible Python interface for th
 ## Core Features
 - **Sympl/CliMT Integration**: Full support for the Sympl data model and CliMT component architecture.
 - **Standalone Dynamical Core**: Independent build and execution environment for the GFS dynamics.
+- **JAX Acceleration**: A differentiable, pure functional JAX implementation of the dynamical core.
+- **Hardware Agnostic**: Support for CPU, GPU, and TPU execution via JAX.
 
 ## Future Roadmap
 - **Modernization**: Gradually refactor and modernize the legacy code to improve maintainability and performance.

@@ -7,6 +7,8 @@
 
 ## Data & Array Backends
 - **NumPy**: The default array backend.
+- **JAX**: For differentiable and hardware-accelerated dynamics.
+- **S2FFT**: JAX-native spectral transforms on the sphere.
 - **unyt**: Unit handling and metadata provider for the `unyt` array backend.
 - **pint**: Alternative unit handling (legacy support).
 - **xarray**: Data structures for multi-dimensional scientific data.
