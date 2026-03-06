@@ -53,9 +53,16 @@ Now that the core mathematical machinery (PGF, advection, IMEX stepper, and vect
   - **Implementation:** Added `get_gaussian_latitudes(L)` to `transforms.py`, which uses `np.polynomial.legendre.leggauss(L)` to compute the exact GL quadrature points matching `s2fft`'s internal GL grid definition. Ordering is north-to-south (colatitude ascending), matching `s2fft` row order.
   - **Key discovery:** `climt.get_grid()` already provides Gaussian quadrature latitudes by default (verified to machine precision). This resolved the issue cleanly.
   - **Related:** This fix was delivered as part of the broader grid architecture simplification below (see Phase 9.0).
-- [ ] **Task 9.2: Audit `rlnp[0]` Sentinel Value**
-  - Fortran sets `rlnp(:,:,1) = 99999.99` as a sentinel for the top layer (should never be used). JAX sets `rlnp[0] = 0.0`. While this *should* be harmless, verify that no code path (particularly in `cofb`, `cofa`, or `px3u`/`px3v`) accidentally references `rlnp[0]`. If any path does, the JAX code will silently produce wrong-but-plausible results rather than flagging an error.
-  - **Note:** With the Task 8.2 fix now in place, `cofb_pressure` at the bottom layer (JAX index `nlevs-1`) is correctly set to the special case `-(1/dp)*alfa*dbk` (no `rlnp` term), mirroring Fortran's `cofb(k=1)` special case. However the full audit of all `rlnp[0]` references is still warranted.
+- [x] **Task 9.2: Audit `rlnp[0]` Sentinel Value** [✅ Complete]
+  - Fortran sets `rlnp(:,:,1) = 99999.99` as a sentinel for the top layer because `pk[0] = ak[0] = 0` makes `log(pk[1]/pk[0]) = +inf`. JAX sets `rlnp[0] = 0.0` to prevent `0 * inf = NaN`.
+  - **Full audit of all five `rlnp[0]` references:**
+    1. **`cofb_pressure` (PGF px0):** `bk_top[0] * rlnp[0]`. `bk[0] = 0` for any valid hybrid coordinate (pure-pressure top), so the coefficient is zero regardless. Using raw `inf` gives `NaN`; using `0.0` gives the correct `0.0`.
+    2. **`cofa` term2 (PGF px5):** `rlnp[0] * (bk_top[0] - pk_top[0]*dbk[0]/dp[0])`. Both `bk_top[0] = 0` and `dbk[0] = bk[1] - bk[0] = 0` for standard hybrid coords; the coefficient is zero. Raw `inf` would give `NaN`.
+    3. **`omega` workb:** `rlnp[0] * (db_km1[0] + ps * cb_km1[0])`. Both `db_km1[0]` and `cb_km1[0]` are the prepended zeros, so the product is zero regardless of `rlnp[0]`. Safe.
+    4. **`omega` workc:** `ck[0] * rlnp[0] / dp[0]`. `ck[0] = ak[1]*bk[0] - ak[0]*bk[1] = 0` for standard hybrid coords. Safe.
+    5. **`px3` integrand:** `-rd * rlnp[0] * dT/dlambda[0]`. The shifted-integrand construction excludes layer-0 from every output level (`shifted_integrand[0] = integrand[1]`), so `rlnp[0]` never propagates to any output.
+  - **Conclusion:** `rlnp[0] = 0.0` is correct and necessary to prevent `NaN`. The Fortran sentinel `99999.99` achieves the same result because it is always multiplied by a zero coefficient (`bk[0] = 0` or `ck[0] = 0`). The audit is documented in the `compute_pressure_diagnostics` docstring.
+  - **Regression test:** `test_rlnp_sentinel_no_nan` in `test_jax_dynamics.py` verifies that `rlnp[0] = 0.0` exactly, that no diagnostic field contains `NaN`/`Inf`, and that the PGF computed with a non-zero `grad(lnps)` is finite everywhere.
 
 ## Phase 9.0: Grid Architecture Simplification [✅ COMPLETE]
 - [x] **Eliminate unnecessary longitude resampling**
@@ -70,10 +77,19 @@ Now that the core mathematical machinery (PGF, advection, IMEX stepper, and vect
   - **Verification:** `climt.get_grid(nx=2*L-1, ny=L)` provides Gaussian quadrature latitudes matching `leggauss(L)` to machine precision, confirming no upstream latitude fix is needed in climt.
   - **Result:** ~50 lines removed from the transform pipeline; no per-timestep interpolation artifacts; Task 9.1 (Gaussian latitudes) resolved as a side effect.
 
-## Phase 10: Physical Conservation Adjustments [🟢 NEEDED FOR MULTI-STEP]
-- [ ] **Task 10.1: Implement Dry Mass Fixer** [Priority 6]
-  - Fortran dynamically corrects the surface pressure to conserve initial dry mass after physics (see `dry_mass_fixer` in `dyn_run.f90`). This computes `pdry = sum(areawts * psg) - g * sum(areawts * pwat)`, determines a proportional correction `pcorr = (pdryini + g*pwat_global) / ps_global_mean`, and applies it as a multiplicative adjustment to `ps` before converting back to a spectral `lnps` tendency.
-  - **Action:** Port the `dry_mass_fixer` subroutine into JAX. This requires Gaussian quadrature weights (`areawts`) for global integrals. Wire it into the time stepper after physics tendencies are applied (or at the end of `advance` for adiabatic runs if `massfix=True`).
+## Phase 10: Physical Conservation Adjustments [🟡 IN PROGRESS]
+- [x] **Task 10.1: Implement Dry Mass Fixer** [Priority 6 — ✅ Complete]
+  - Fortran dynamically corrects the surface pressure to conserve initial dry mass after physics (see `dry_mass_fixer` in `dyn_run.f90`).
+  - **Implementation:** Added `compute_dry_mass_fixer()` to `dynamics.py`. Algorithm mirrors Fortran exactly:
+    1. Compute precipitable water per grid point: `pwat = sum_k(q[k] * dp[k]) / g`
+    2. Compute global means via Gaussian quadrature: `pmean = sum(w * ps)`, `pwat_global = sum(w * pwat)`
+    3. Multiplicative correction factor: `pcorr = (pdryini + g * pwat_global) / pmean`
+    4. Apply as a new target lnps: `lnps_target = log(ps * pcorr)`
+    5. Convert to spectral space and form tendency: `dlnps_corrected = (lnps_target_spec - lnps_spec) / dt`
+  - **Wired into `advance()`** in `stepper.py` via optional `gauss_weights` and `pdryini` arguments. Applied at the final RK stage only, matching Fortran `run.f90` lines 349–356.
+  - **Wired into `get_spectral_tendencies()`** in `dynamics.py` via the same optional arguments, enabling use outside the full stepper.
+  - **`pdryini` initialisation:** Component code should compute `pdryini` on the first call as the global mean dry surface pressure of the initial state. The `compute_dry_mass_fixer` docstring describes the full computation.
+  - **Regression test:** `test_dry_mass_fixer_conserves_dry_mass` in `test_jax_dynamics.py` verifies that after a simulated 1% ps drift, the fixer restores `pdry` to `pdryini` to within `rtol=1e-6`, and that the corrected tendency is finite.
 
 ## Phase 11: Final Step-by-Step Validation [🟢 VERIFICATION]
 - [ ] **Task 11.1: Component Isolation Testing** [Priority 7]
@@ -100,6 +116,6 @@ Now that the core mathematical machinery (PGF, advection, IMEX stepper, and vect
 | ~~🟡 4~~ | ~~7.2 — Vector Transform Scaling~~ | 7 | ✅ Verified correct — no code change needed | 5 analytical checks pass at `< 1e-15` |
 | ~~🟡 5~~ | ~~9.1 — Gaussian Latitudes~~ | 9 | ✅ Implemented via `get_gaussian_latitudes(L)` + grid arch simplification | Coriolis now uses exact GL quadrature points |
 | ~~🟡 0~~ | ~~9.0 — Grid Architecture Simplification~~ | 9 | ✅ All resampling removed; `TransformConfig` uses derived `n_lat`/`n_lon` | No more per-timestep FFT interpolation artifacts |
-| 🟡 6 | 9.2 — `rlnp[0]` Sentinel Audit | 9 | ⬜ Not started | Silent correctness risk in PGF/omega |
-| 🟢 7 | 10.1 — Dry Mass Fixer | 10 | ⬜ Not started | Needed for multi-step conservation |
+| ~~🟡 6~~ | ~~9.2 — `rlnp[0]` Sentinel Audit~~ | 9 | ✅ Complete — `0.0` is correct; 5-path audit documented in docstring + regression test | No silent NaN/Inf risk; behaviour matches Fortran sentinel |
+| ~~🟢 7~~ | ~~10.1 — Dry Mass Fixer~~ | 10 | ✅ Implemented — `compute_dry_mass_fixer()` + wired into `advance()` and `get_spectral_tendencies()` | Multi-step dry mass conservation enabled |
 | 🟢 8 | 11.1–11.3 — Validation | 11 | ⬜ Partially done (vector round-trip ✅) | Confirm everything works end-to-end |

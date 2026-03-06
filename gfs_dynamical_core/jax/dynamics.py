@@ -72,6 +72,42 @@ def compute_pressure_diagnostics(
 
     Returns:
         PressureDiagnostics: Containing interface pressures, thickness, etc.
+
+    Notes on rlnp[0] sentinel (Task 9.2 audit):
+        Fortran sets rlnp(:,:,1) = 99999.99 as a sentinel for the top model
+        layer, because the top interface pressure pk[0] = ak[0] = 0 makes
+        log(pk[1]/pk[0]) = log(pk[1]/0) = +inf.  Fortran's sentinel avoids
+        using that infinity in arithmetic.
+
+        JAX sets rlnp[0] = 0.0 instead.  The audit below confirms this is
+        numerically correct for all code paths that reference rlnp[0]:
+
+        1. cofb_pressure (PGF px0):  bk_top[0] * rlnp[0].
+           For any valid hybrid coordinate bk[0] = 0 (pure-pressure top),
+           so bk_top[0] = 0.  Using raw rlnp[0] = inf gives 0 * inf = NaN;
+           using 0.0 gives 0 * 0.0 = 0.0, which is correct.
+
+        2. cofa term2 (PGF px5):  rlnp[0] * (bk_top[0] - pk_top[0]*dbk[0]/dp[0]).
+           bk_top[0] = 0 and dbk[0] = bk[1] - bk[0] = 0 for standard hybrid
+           coords (bk = 0 for all pure-pressure top layers).  The coefficient
+           is therefore 0; using raw inf would give NaN, 0.0 gives 0.0.
+
+        3. omega workb:  rlnp[0] * (db_km1[0] + ps * cb_km1[0]).
+           db_km1[0] = db_with_zero[0] = 0 and cb_km1[0] = 0 (prepended
+           zeros); result is 0 regardless of rlnp[0].
+
+        4. omega workc:  ck[0] * rlnp[0] / dp[0].
+           ck[0] = ak[1]*bk[0] - ak[0]*bk[1] = 0 for standard hybrid
+           coords; result is 0 regardless of rlnp[0].
+
+        5. px3 integrand:  -rd * rlnp[0] * dT/dlambda[0].
+           The shifted integrand construction in compute_pressure_gradient_force
+           excludes layer-0 from every px3 output level (shifted_integrand[0]
+           maps to integrand[1], so rlnp[0] never propagates to any output).
+
+        Conclusion: rlnp[0] = 0.0 is correct and necessary to prevent NaN.
+        The Fortran sentinel 99999.99 achieves the same end because it is
+        always multiplied by a zero coefficient (bk[0] = 0 or ck[0] = 0).
     """
     ps = jnp.exp(log_ps)
     pk = config.ak[:, None, None] + config.bk[:, None, None] * (
@@ -83,6 +119,8 @@ def compute_pressure_diagnostics(
     rlnp = jnp.log(pk[1:] / pk[:-1])
     alfa = 1.0 - (pk[:-1] / dp) * rlnp
     alfa = alfa.at[0].set(jnp.log(2.0))
+    # Set rlnp[0] = 0.0 to avoid NaN from 0 * inf.  See docstring for full
+    # audit confirming this is numerically correct for all uses of rlnp.
     rlnp = rlnp.at[0].set(0.0)
     return PressureDiagnostics(ps=ps, pk=pk, dp=dp, prs=prs, alfa=alfa, rlnp=rlnp)
 
@@ -529,6 +567,104 @@ def assemble_grid_tendencies(
     )
 
 
+def compute_dry_mass_fixer(
+    ps: jnp.ndarray,
+    tracers: jnp.ndarray,
+    dp: jnp.ndarray,
+    log_surface_pressure: jnp.ndarray,
+    lnps_spectral_tend: jnp.ndarray,
+    gauss_weights: jnp.ndarray,
+    pdryini: float,
+    g: float,
+    dt: float,
+) -> jnp.ndarray:
+    """
+    Adjusts the spectral lnps tendency so the global integral of dry surface
+    pressure returns to its initial value ``pdryini`` after one timestep.
+
+    Mirrors Fortran ``dyn_run.f90: dry_mass_fixer``.
+
+    Algorithm (Fortran lines 715–748):
+      1. Compute global-mean precipitable water:
+            pwat_global = sum(areawts * pwat)
+         where pwat[j] = (1/g) * sum_k(q[k,j] * dp[k,j])
+      2. Compute global-mean surface pressure:
+            pmean = sum(areawts * ps)
+      3. The global-mean dry surface pressure is:
+            pdry = pmean - g * pwat_global
+      4. The multiplicative correction that restores dry mass to pdryini:
+            pcorr = (pdryini + g * pwat_global) / pmean
+      5. Apply the correction as a new target lnps field:
+            lnps_target = log(ps * pcorr)
+      6. Convert lnps_target to spectral space, then compute the corrected
+         tendency as:
+            dlnpsspecdt_corrected = (lnps_target_spec - lnps_spec) / dt
+
+    The correction is applied as a tendency rather than directly to lnps so
+    that it is applied consistently within the IMEX stepper, matching the
+    Fortran approach of modifying ``dlnpsspecdt1`` in ``run.f90``.
+
+    Args:
+        ps: Surface pressure in Pa, shape ``(n_lat, n_lon)``.
+        tracers: Tracer fields, shape ``(n_tracers, n_lev, n_lat, n_lon)``.
+            The first tracer (index 0) is specific humidity.
+        dp: Layer pressure thickness, shape ``(n_lev, n_lat, n_lon)``.
+        log_surface_pressure: Current spectral lnps coefficients,
+            shape ``(L, 2*L-1)``.
+        lnps_spectral_tend: Current spectral lnps tendency (before fixer),
+            shape ``(L, 2*L-1)``.
+        gauss_weights: Normalised Gaussian quadrature weights summing to 1,
+            shape ``(n_lat,)``.  Each weight applies to the full longitude ring.
+        pdryini: Initial global mean dry surface pressure (Pa).
+        g: Gravitational acceleration (m s⁻²).
+        dt: Timestep in seconds.
+
+    Returns:
+        jnp.ndarray: Corrected spectral lnps tendency, same shape as
+            ``lnps_spectral_tend``.
+    """
+    import s2fft
+
+    # ------------------------------------------------------------------
+    # Step 1: precipitable water column per grid point (Pa/g * g = Pa)
+    # pwat[j] = (1/g) * sum_k(q[k,j] * dp[k,j])   (Fortran units: kg/m²)
+    # ------------------------------------------------------------------
+    q = tracers[0]  # specific humidity, shape (n_lev, n_lat, n_lon)
+    pwat = jnp.sum(q * dp, axis=0) / g  # (n_lat, n_lon)
+
+    # ------------------------------------------------------------------
+    # Step 2-3: global means via Gaussian quadrature weights
+    # areawts is 2D in Fortran but constant in longitude; we use 1D weights
+    # broadcast over longitude.  weights are already normalised (sum=1).
+    # ------------------------------------------------------------------
+    n_lon = ps.shape[-1]
+    w = gauss_weights[:, None]  # (n_lat, 1)  — broadcast over lon
+    pmean = jnp.sum(w * ps) / n_lon  # scalar global mean ps
+    pwat_global = jnp.sum(w * pwat) / n_lon  # scalar global mean pwat
+
+    # ------------------------------------------------------------------
+    # Step 4: multiplicative correction factor
+    # pcorr = (pdryini + g * pwat_global) / pmean
+    # ------------------------------------------------------------------
+    pcorr = (pdryini + g * pwat_global) / pmean
+
+    # ------------------------------------------------------------------
+    # Step 5-6: build corrected lnps in grid space, transform to spectral,
+    # then form the tendency  dlnps_corrected = (lnps_target - lnps) / dt
+    # ------------------------------------------------------------------
+    lnps_target_grid = jnp.log(ps * pcorr)
+
+    # Determine L and sampling from the spectral coefficient shape.
+    # log_surface_pressure has shape (L, 2*L-1).
+    L = log_surface_pressure.shape[0]
+    # We need to infer the sampling used; for GL it is always "gl" in this port.
+    sampling = "gl"
+    lnps_target_spec = s2fft.forward_jax(lnps_target_grid, L, sampling=sampling)
+
+    corrected_tend = (lnps_target_spec - log_surface_pressure) / dt
+    return corrected_tend
+
+
 def full_dynamics_step(
     grid_state: GridState,
     grid_grads: GridGradients,
@@ -569,6 +705,9 @@ def get_spectral_tendencies(
     dyn_config: DynamicsConfig,
     trans_config: TransformConfig,
     latitudes: jnp.ndarray,
+    gauss_weights: jnp.ndarray | None = None,
+    pdryini: float | None = None,
+    dt: float | None = None,
 ) -> SpectralTendencies:
     """
     Computes spectral tendencies from spectral state (equivalent to getdyntend).
@@ -579,6 +718,12 @@ def get_spectral_tendencies(
         dyn_config: Dynamics configuration.
         trans_config: Transform configuration.
         latitudes: Latitudes in radians.
+        gauss_weights: Normalised Gaussian quadrature weights, shape (n_lat,).
+            Required when pdryini is provided; used for global area integrals.
+        pdryini: Initial global mean dry surface pressure (Pa).  When provided
+            (and gauss_weights and dt are also provided), the dry-mass fixer is
+            applied to the lnps spectral tendency after the dynamics step.
+        dt: Timestep in seconds.  Required when pdryini is provided.
 
     Returns:
         SpectralTendencies: Tendencies in spectral space.
@@ -588,4 +733,32 @@ def get_spectral_tendencies(
         grid_state, grid_grads, phis_grads, dyn_config, latitudes
     )
     spec_tends = grid_to_spectral_tendencies(grid_tends, trans_config)
+
+    # Task 10.1: apply dry-mass fixer when enabled.
+    # Mirrors Fortran run.f90 lines 349-356: after physics tendencies are
+    # accumulated, dry_mass_fixer adjusts dlnpsspecdt so that the global
+    # integral of dry surface pressure returns to pdryini.
+    if pdryini is not None and gauss_weights is not None and dt is not None:
+        press_diag = compute_pressure_diagnostics(
+            grid_state.log_surface_pressure, dyn_config
+        )
+        corrected_lnps_tend = compute_dry_mass_fixer(
+            ps=press_diag.ps,
+            tracers=grid_state.tracers,
+            dp=press_diag.dp,
+            log_surface_pressure=spec_state.log_surface_pressure,
+            lnps_spectral_tend=spec_tends.d_log_surface_pressure_d_t,
+            gauss_weights=gauss_weights,
+            pdryini=pdryini,
+            g=dyn_config.g,
+            dt=dt,
+        )
+        spec_tends = SpectralTendencies(
+            d_vorticity_d_t=spec_tends.d_vorticity_d_t,
+            d_divergence_d_t=spec_tends.d_divergence_d_t,
+            d_temperature_d_t=spec_tends.d_temperature_d_t,
+            d_log_surface_pressure_d_t=corrected_lnps_tend,
+            d_tracers_d_t=spec_tends.d_tracers_d_t,
+        )
+
     return spec_tends
