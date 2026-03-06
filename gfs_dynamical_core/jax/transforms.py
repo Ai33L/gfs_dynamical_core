@@ -1,8 +1,11 @@
 import jax
 import jax.numpy as jnp
-from flax import struct
+import numpy as np
 import s2fft
-from .states import SpectralState, GridState, GridGradients, SpectralTendencies
+from flax import struct
+
+from .states import GridGradients, GridState, SpectralState, SpectralTendencies
+
 
 def get_grid_dimensions(L: int, sampling: str) -> tuple[int, int]:
     """Returns (n_lat, n_lon) for a given L and sampling."""
@@ -17,94 +20,316 @@ def get_grid_dimensions(L: int, sampling: str) -> tuple[int, int]:
 
 @struct.dataclass
 class TransformConfig:
-    """Configuration for spectral transforms."""
-    L: int  # Bandlimit (truncation + 1)
-    n_lat: int
-    n_lon: int
-    sampling: str = "gl"  # Gauss-Legendre for GFS
+    """Configuration for spectral transforms.
+
+    Grid dimensions are derived directly from L and sampling:
+      - GL/MW:  n_lat = L,   n_lon = 2*L - 1
+      - DH:     n_lat = 2*L, n_lon = 2*L
+
+    No external n_lat/n_lon needed; all grid-space arrays inside the
+    dynamics pipeline use the native s2fft sizes.
+    """
+
+    L: int = struct.field(pytree_node=False)  # Bandlimit (truncation + 1)
+    sampling: str = struct.field(
+        pytree_node=False, default="gl"
+    )  # Gauss-Legendre for GFS
     radius: float = 6371000.0
-    
+
     @property
     def truncation(self):
         return self.L - 1
 
-def spectral_to_grid(spec_state: SpectralState, config: TransformConfig) -> tuple[GridState, GridGradients]:
+    @property
+    def n_lat(self):
+        return get_grid_dimensions(self.L, self.sampling)[0]
+
+    @property
+    def n_lon(self):
+        return get_grid_dimensions(self.L, self.sampling)[1]
+
+
+def get_gaussian_latitudes(L: int) -> jnp.ndarray:
+    """Compute Gaussian quadrature latitudes (in radians) for GL sampling.
+
+    s2fft GL sampling uses colatitudes theta from ``np.polynomial.legendre.leggauss``.
+    We convert to geographic latitude phi = pi/2 - theta, so that phi ranges from
+    approximately +pi/2 (north pole) to -pi/2 (south pole).
+
+    Returns:
+        jnp.ndarray: Latitudes in radians, shape ``(L,)``, north-to-south
+            (matching s2fft's GL row order which goes theta = small -> large,
+            i.e. north -> south).
+    """
+    # s2fft thetas for GL: flip(arccos(leggauss(L)[0]))  -> theta ascending (N->S)
+    cos_theta, _ = np.polynomial.legendre.leggauss(L)
+    thetas = np.flip(np.arccos(cos_theta))  # colatitude, ascending
+    latitudes = np.pi / 2.0 - thetas  # geographic latitude, N->S descending
+    return jnp.array(latitudes)
+
+
+def spectral_to_grid(
+    spec_state: SpectralState, config: TransformConfig
+) -> tuple[GridState, GridGradients]:
     """
     Transforms spectral state to grid space, including gradients.
+
+    All output arrays use native s2fft grid dimensions (L, 2*L-1) for GL sampling.
+    No longitude resampling is performed.
     """
     L = config.L
     sampling = config.sampling
-    
+    radius = config.radius
+
+    l_arr = jnp.arange(L)
+    l_factor = jnp.sqrt(l_arr * (l_arr + 1))
+    # Avoid division by zero at l=0
+    inv_l_factor = jnp.where(l_arr > 0, 1.0 / l_factor, 0.0)
+
     def transform_level(vort, div, temp, tracers):
         # 1. Scalar transforms
-        grid_t = s2fft.inverse(temp, L, sampling=sampling, method="jax")
-        grid_vort = s2fft.inverse(vort, L, sampling=sampling, method="jax")
-        grid_div = s2fft.inverse(div, L, sampling=sampling, method="jax")
-        
-        # 2. Vector transforms (vort, div -> u, v)
-        # Note: GFS uses specific formulas. s2fft has vector transforms too.
-        # For now, we mock u, v as zero and will implement properly later.
-        grid_u = jnp.zeros_like(grid_t)
-        grid_v = jnp.zeros_like(grid_t)
-        
-        # 3. Tracers
-        grid_tracers = jax.vmap(lambda flm: s2fft.inverse(flm, L, sampling=sampling, method="jax"))(tracers)
-        
-        return grid_u, grid_v, grid_t, grid_vort, grid_div, grid_tracers
+        grid_t = s2fft.inverse_jax(temp, L, sampling=sampling)
+        grid_vort = s2fft.inverse_jax(vort, L, sampling=sampling)
+        grid_div = s2fft.inverse_jax(div, L, sampling=sampling)
 
-    grid_u, grid_v, grid_t, grid_vort, grid_div, grid_tracers = jax.vmap(transform_level)(
-        spec_state.vorticity, 
-        spec_state.divergence, 
+        # 2. Vector transforms (vort, div -> u, v)
+        # F1_lm = (D_lm + i zeta_lm) / sqrt(l(l+1))
+        F1_lm = inv_l_factor[:, None] * (div + 1j * vort)
+        f_spin1 = s2fft.inverse_jax(F1_lm, L, spin=1, sampling=sampling)
+        # u = Imag(f_spin1), v = -Real(f_spin1)
+        grid_u = f_spin1.imag / radius
+        grid_v = -f_spin1.real / radius
+
+        # 3. Tracers (scalar inverse transforms)
+        grid_tracers = jax.vmap(
+            lambda flm: s2fft.inverse_jax(flm, L, sampling=sampling)
+        )(tracers)
+
+        # 4. Temperature Gradients
+        F1_t_lm = -l_factor[:, None] * temp
+        f_t_spin1 = s2fft.inverse_jax(F1_t_lm, L, spin=1, sampling=sampling)
+        grad_t_x = f_t_spin1.imag / radius
+        grad_t_y = -f_t_spin1.real / radius
+
+        # 5. Tracer Gradients (same spin-1 approach as temperature)
+        # tracers shape here: (n_tracers, L, 2*L-1)
+        def _tracer_grad(tracer_flm):
+            F1_lm_ = -l_factor[:, None] * tracer_flm
+            f_spin1_ = s2fft.inverse_jax(F1_lm_, L, spin=1, sampling=sampling)
+            return f_spin1_.imag / radius, -f_spin1_.real / radius
+
+        grad_tracers_x, grad_tracers_y = jax.vmap(_tracer_grad)(tracers)
+        # grad_tracers_x/y shape: (n_tracers, n_lat, n_lon)
+
+        return (
+            grid_u,
+            grid_v,
+            grid_t,
+            grid_vort,
+            grid_div,
+            grid_tracers,
+            grad_t_x,
+            grad_t_y,
+            grad_tracers_x,
+            grad_tracers_y,
+        )
+
+    (
+        grid_u,
+        grid_v,
+        grid_t,
+        grid_vort,
+        grid_div,
+        grid_tracers,
+        grad_t_x,
+        grad_t_y,
+        grad_tracers_x,
+        grad_tracers_y,
+    ) = jax.vmap(transform_level)(
+        spec_state.vorticity,
+        spec_state.divergence,
         spec_state.temperature,
-        spec_state.tracers.transpose(1, 0, 2, 3)
+        spec_state.tracers.transpose(1, 0, 2, 3),
     )
-    
-    grid_lnps = s2fft.inverse(spec_state.log_surface_pressure, L, sampling=sampling, method="jax")
-    
+    # After vmap:
+    #   grad_tracers_x / grad_tracers_y shape: (levels, n_tracers, n_lat, n_lon)
+    # Reorder to (n_tracers, levels, n_lat, n_lon) to match tracers convention
+    grad_tracers_x = grad_tracers_x.transpose(1, 0, 2, 3)
+    grad_tracers_y = grad_tracers_y.transpose(1, 0, 2, 3)
+
+    lnps = s2fft.inverse_jax(spec_state.log_surface_pressure, L, sampling=sampling)
+
+    # Log surface pressure gradients
+    F1_lnps_lm = -l_factor[:, None] * spec_state.log_surface_pressure
+    f_lnps_spin1 = s2fft.inverse_jax(F1_lnps_lm, L, spin=1, sampling=sampling)
+    grad_lnps_x = f_lnps_spin1.imag / radius
+    grad_lnps_y = -f_lnps_spin1.real / radius
+
     grid_state = GridState(
-        u=grid_u, v=grid_v, temperature=grid_t,
-        vorticity=grid_vort, divergence=grid_div,
-        log_surface_pressure=grid_lnps,
-        tracers=grid_tracers.transpose(1, 0, 2, 3)
+        u=grid_u,
+        v=grid_v,
+        temperature=grid_t,
+        vorticity=grid_vort,
+        divergence=grid_div,
+        log_surface_pressure=lnps,
+        tracers=grid_tracers.transpose(1, 0, 2, 3),
     )
-    
-    # 4. Mock gradients for now
+
     grid_grads = GridGradients(
-        d_log_ps_d_phi=jnp.zeros_like(grid_lnps),
-        d_log_ps_d_lambda=jnp.zeros_like(grid_lnps),
-        d_t_d_phi=jnp.zeros_like(grid_t),
-        d_t_d_lambda=jnp.zeros_like(grid_t)
+        d_log_ps_d_lambda=grad_lnps_x,
+        d_log_ps_d_phi=grad_lnps_y,
+        d_t_d_lambda=grad_t_x,
+        d_t_d_phi=grad_t_y,
+        d_tracers_d_lambda=grad_tracers_x,
+        d_tracers_d_phi=grad_tracers_y,
     )
-    
+
     return grid_state, grid_grads
 
-def grid_to_spectral_tendencies(grid_tends, config: TransformConfig) -> SpectralTendencies:
+
+def enforce_triangular_truncation(flm, L, T):
     """
-    Transforms grid-space tendencies back to spectral space.
+    Zero out spherical harmonics where l > T or |m| > T.
+    flm shape: (..., L, 2L-1)
+    """
+    l_arr = jnp.arange(L)
+    m_arr = jnp.arange(-L + 1, L)
+    l_grid, m_grid = jnp.meshgrid(l_arr, m_arr, indexing="ij")
+    mask = (l_grid <= T) & (jnp.abs(m_grid) <= T)
+
+    # Expand mask for prepended dimensions
+    for _ in range(flm.ndim - 2):
+        mask = jnp.expand_dims(mask, axis=0)
+
+    return jnp.where(mask, flm, 0.0)
+
+
+def grid_to_spectral(grid_state: GridState, config: TransformConfig) -> SpectralState:
+    """
+    Transforms grid state to spectral state.
+
+    Input arrays are expected in native s2fft grid dimensions (L, 2*L-1) for GL.
+    No longitude resampling is performed.
     """
     L = config.L
+    T = config.truncation
     sampling = config.sampling
-    
+    radius = config.radius
+
+    l_arr = jnp.arange(L)
+    l_factor = jnp.sqrt(l_arr * (l_arr + 1))
+
+    def transform_level(u, v, temp, tracers):
+        # 1. Scalar transforms
+        flm_temp = s2fft.forward_jax(temp, L, sampling=sampling)
+
+        # 2. Vector transforms (u, v -> vort, div)
+        # f_spin1 = -v_meridional + i u_zonal
+        f_spin1 = -v + 1j * u
+        F1_lm = s2fft.forward_jax(f_spin1, L, spin=1, sampling=sampling)
+
+        # D + i zeta = sqrt(l(l+1)) * F1_lm / radius
+        D_plus_izeta = l_factor[:, None] * F1_lm / radius
+        flm_div = D_plus_izeta.real
+        flm_vort = D_plus_izeta.imag
+
+        # 3. Tracers
+        flm_tracers = jax.vmap(lambda f: s2fft.forward_jax(f, L, sampling=sampling))(
+            tracers
+        )
+
+        return flm_vort, flm_div, flm_temp, flm_tracers
+
+    flm_vort, flm_div, flm_temp, flm_tracers = jax.vmap(transform_level)(
+        grid_state.u,
+        grid_state.v,
+        grid_state.temperature,
+        grid_state.tracers.transpose(1, 0, 2, 3),
+    )
+
+    flm_lnps = s2fft.forward_jax(grid_state.log_surface_pressure, L, sampling=sampling)
+
+    # Enforce exact triangular truncation limit
+    flm_vort = enforce_triangular_truncation(flm_vort, L, T)
+    flm_div = enforce_triangular_truncation(flm_div, L, T)
+    flm_temp = enforce_triangular_truncation(flm_temp, L, T)
+    flm_lnps = enforce_triangular_truncation(flm_lnps, L, T)
+    flm_tracers = enforce_triangular_truncation(flm_tracers, L, T)
+
+    spec_state = SpectralState(
+        vorticity=flm_vort,
+        divergence=flm_div,
+        temperature=flm_temp,
+        log_surface_pressure=flm_lnps,
+        tracers=flm_tracers.transpose(1, 0, 2, 3),
+    )
+
+    return spec_state
+
+
+def grid_to_spectral_tendencies(
+    grid_tends, config: TransformConfig
+) -> SpectralTendencies:
+    """
+    Transforms grid-space tendencies back to spectral space.
+
+    Input arrays are expected in native s2fft grid dimensions (L, 2*L-1) for GL.
+    No longitude resampling is performed.
+    """
+    L = config.L
+    T = config.truncation
+    sampling = config.sampling
+    radius = config.radius
+
+    l_arr = jnp.arange(L)
+    l_factor = jnp.sqrt(l_arr * (l_arr + 1))
+
     # temp, lnps, tracers are scalars
-    flm_temp = jax.vmap(lambda f: s2fft.forward(f, L, sampling=sampling, method="jax"))(grid_tends.temp_tend)
-    flm_lnps = s2fft.forward(grid_tends.log_ps_tend, L, sampling=sampling, method="jax")
-    
+    flm_temp = jax.vmap(lambda f: s2fft.forward_jax(f, L, sampling=sampling))(
+        grid_tends.temp_tend
+    )
+
+    flm_lnps = s2fft.forward_jax(grid_tends.log_ps_tend, L, sampling=sampling)
+
     def forward_tracers(tracers):
-        return jax.vmap(lambda f: s2fft.forward(f, L, sampling=sampling, method="jax"))(tracers)
-    
+        return jax.vmap(lambda f: s2fft.forward_jax(f, L, sampling=sampling))(tracers)
+
     flm_tracers = jax.vmap(forward_tracers)(grid_tends.tracer_tends)
-    
-    # vorticity and divergence tendencies from momentum fluxes
-    # d(zeta)/dt = -div(u_flux, v_flux)
-    # d(div)/dt = curl(u_flux, v_flux) - lap(KE)
-    # For now, mock them as zero.
-    flm_vort = jnp.zeros_like(flm_temp)
-    flm_div = jnp.zeros_like(flm_temp)
-    
+
+    def transform_vector_tendencies(u_flux, v_flux):
+        f_spin1 = -v_flux + 1j * u_flux
+        F1_lm = s2fft.forward_jax(f_spin1, L, spin=1, sampling=sampling)
+
+        # D_dot + i zeta_dot = sqrt(l(l+1)) * F1_lm
+        D_plus_izeta = l_factor[:, None] * F1_lm / radius
+
+        d_div = D_plus_izeta.real
+        d_vort = D_plus_izeta.imag
+        return d_vort, d_div
+
+    flm_vort, flm_div = jax.vmap(transform_vector_tendencies)(
+        grid_tends.u_flux, grid_tends.v_flux
+    )
+
+    # Add KE Laplacian to divergence tendency
+    def add_ke_laplacian(ke, div_tend):
+        ke_lm = s2fft.forward_jax(ke, L, sampling=sampling)
+        laplacian_ke = -(l_arr * (l_arr + 1))[:, None] * ke_lm / (radius**2)
+        return div_tend - laplacian_ke
+
+    flm_div = jax.vmap(add_ke_laplacian)(grid_tends.kinetic_energy, flm_div)
+
+    # Enforce exact triangular truncation limit
+    flm_vort = enforce_triangular_truncation(flm_vort, L, T)
+    flm_div = enforce_triangular_truncation(flm_div, L, T)
+    flm_temp = enforce_triangular_truncation(flm_temp, L, T)
+    flm_lnps = enforce_triangular_truncation(flm_lnps, L, T)
+    flm_tracers = enforce_triangular_truncation(flm_tracers, L, T)
+
     return SpectralTendencies(
         d_vorticity_d_t=flm_vort,
         d_divergence_d_t=flm_div,
         d_temperature_d_t=flm_temp,
         d_log_surface_pressure_d_t=flm_lnps,
-        d_tracers_d_t=flm_tracers
+        d_tracers_d_t=flm_tracers,
     )
