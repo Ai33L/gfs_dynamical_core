@@ -49,7 +49,18 @@ class GridTendencies:
     kinetic_energy: jnp.ndarray # 0.5 * (u^2 + v^2)
 
 def compute_pressure_diagnostics(log_ps: jnp.ndarray, config: DynamicsConfig) -> PressureDiagnostics:
-    """Computes pressure-related diagnostics."""
+    """
+    Computes pressure-related diagnostics from log surface pressure.
+    
+    Equivalent to Fortran's calc_pressdata.
+
+    Args:
+        log_ps: Log of surface pressure (n_lat, n_lon).
+        config: Dynamics configuration and constants.
+
+    Returns:
+        PressureDiagnostics: Containing interface pressures, thickness, etc.
+    """
     ps = jnp.exp(log_ps)
     pk = config.ak[:, None, None] + config.bk[:, None, None] * (ps[None, :, :] - config.toa_pressure)
     dp = pk[1:] - pk[:-1]
@@ -67,7 +78,21 @@ def compute_vertical_velocities(
     press_diag: PressureDiagnostics,
     config: DynamicsConfig
 ) -> VerticalVelocities:
-    """Computes omega, etadot, and log surface pressure tendency."""
+    """
+    Computes omega, etadot, and log surface pressure tendency.
+    
+    Equivalent to Fortran's getomega.
+    Standardized to TOP-TO-BOTTOM indexing (k=0 is top layer).
+
+    Args:
+        grid_state: State in grid space.
+        grid_grads: Gradients in grid space.
+        press_diag: Pressure diagnostics.
+        config: Dynamics configuration.
+
+    Returns:
+        VerticalVelocities: omega, etadot, and dlnps/dt.
+    """
     cg = grid_state.u * grid_grads.d_log_ps_d_lambda + grid_state.v * grid_grads.d_log_ps_d_phi
     div_dp = grid_state.divergence * press_diag.dp
     cg_dbk = cg * config.dbk[:, None, None]
@@ -88,7 +113,17 @@ def compute_vertical_velocities(
     return VerticalVelocities(omega=omega, etadot=etadot, d_log_ps_d_t=d_log_ps_d_t)
 
 def compute_vertical_advection(data: jnp.ndarray, etadot: jnp.ndarray, dp: jnp.ndarray) -> jnp.ndarray:
-    """Computes vertical advection using second-order centered differences."""
+    """
+    Computes vertical advection using second-order centered differences.
+
+    Args:
+        data: Field to advect (levels, n_lat, n_lon).
+        etadot: Vertical velocity on interfaces (levels+1, n_lat, n_lon).
+        dp: Layer pressure thickness (levels, n_lat, n_lon).
+
+    Returns:
+        jnp.ndarray: Vertical advection tendency.
+    """
     n_lev = data.shape[0]
     vadv_top = (0.5 / dp[0]) * etadot[1] * (data[1] - data[0])
     vadv_bot = (0.5 / dp[-1]) * etadot[-2] * (data[-2] - data[-1])
@@ -106,7 +141,19 @@ def compute_pressure_gradient_force(
     config: DynamicsConfig,
     surface_geopotential_grads: tuple[jnp.ndarray, jnp.ndarray]
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Computes horizontal pressure gradient force components."""
+    """
+    Computes horizontal pressure gradient force components.
+
+    Args:
+        virtual_temp: Virtual temperature.
+        grid_grads: Gradients in grid space.
+        press_diag: Pressure diagnostics.
+        config: Dynamics configuration.
+        surface_geopotential_grads: Gradients of surface geopotential (grad_x, grad_y).
+
+    Returns:
+        tuple[jnp.ndarray, jnp.ndarray]: (pgf_x, pgf_y) tendencies.
+    """
     rd = config.rd
     ps = press_diag.ps
     dlnpsdx = grid_grads.d_log_ps_d_lambda
@@ -132,7 +179,18 @@ def compute_energy_conversion(
     specific_humidity: jnp.ndarray, 
     config: DynamicsConfig
 ) -> jnp.ndarray:
-    """Computes thermodynamic energy conversion term."""
+    """
+    Computes thermodynamic energy conversion term.
+
+    Args:
+        omega: Pressure vertical velocity (divided by pressure).
+        virtual_temp: Virtual temperature.
+        specific_humidity: Specific humidity.
+        config: Dynamics configuration.
+
+    Returns:
+        jnp.ndarray: Energy conversion tendency.
+    """
     term = 1.0 + (config.cvap / config.cp - 1.0) * specific_humidity
     return config.rk * omega * virtual_temp / term
 
@@ -146,7 +204,22 @@ def assemble_grid_tendencies(
     config: DynamicsConfig,
     latitudes: jnp.ndarray
 ) -> GridTendencies:
-    """Assembles all grid-space tendencies."""
+    """
+    Assembles all grid-space tendencies.
+
+    Args:
+        grid_state: State in grid space.
+        grid_grads: Gradients in grid space.
+        vvels: Vertical velocities.
+        press_diag: Pressure diagnostics.
+        pgf: Pressure gradient force components.
+        energy_conv: Energy conversion term.
+        config: Dynamics configuration.
+        latitudes: Latitudes in radians.
+
+    Returns:
+        GridTendencies: Assembled grid-space tendencies.
+    """
     u, v = grid_state.u, grid_state.v
     vort = grid_state.vorticity
     pgf_x, pgf_y = pgf
@@ -176,7 +249,19 @@ def full_dynamics_step(
     config: DynamicsConfig,
     latitudes: jnp.ndarray
 ) -> GridTendencies:
-    """Performs a full dynamical core step in grid space."""
+    """
+    Performs a full dynamical core step in grid space.
+
+    Args:
+        grid_state: State in grid space.
+        grid_grads: Gradients in grid space.
+        phis_grads: Surface geopotential gradients.
+        config: Dynamics configuration.
+        latitudes: Latitudes in radians.
+
+    Returns:
+        GridTendencies: Resulting tendencies in grid space.
+    """
     press_diag = compute_pressure_diagnostics(grid_state.log_surface_pressure, config)
     vvels = compute_vertical_velocities(grid_state, grid_grads, press_diag, config)
     pgf = compute_pressure_gradient_force(grid_state.temperature, grid_grads, press_diag, config, phis_grads)
@@ -191,7 +276,19 @@ def get_spectral_tendencies(
     trans_config: TransformConfig,
     latitudes: jnp.ndarray
 ) -> SpectralTendencies:
-    """Computes spectral tendencies from spectral state (equivalent to getdyntend)."""
+    """
+    Computes spectral tendencies from spectral state (equivalent to getdyntend).
+
+    Args:
+        spec_state: State in spectral space.
+        phis_grads: Surface geopotential gradients.
+        dyn_config: Dynamics configuration.
+        trans_config: Transform configuration.
+        latitudes: Latitudes in radians.
+
+    Returns:
+        SpectralTendencies: Tendencies in spectral space.
+    """
     grid_state, grid_grads = spectral_to_grid(spec_state, trans_config)
     grid_tends = full_dynamics_step(grid_state, grid_grads, phis_grads, dyn_config, latitudes)
     spec_tends = grid_to_spectral_tendencies(grid_tends, trans_config)

@@ -13,6 +13,8 @@ def get_grid_dimensions(L: int, sampling: str) -> tuple[int, int]:
     elif sampling == "dh":
         return 2 * L, 2 * L
     return L, 2 * L
+
+
 @struct.dataclass
 class TransformConfig:
     """Configuration for spectral transforms."""

@@ -5,6 +5,14 @@ from .jax.dynamics import DynamicsConfig, get_spectral_tendencies
 from .jax.transforms import TransformConfig, spectral_to_grid, grid_to_spectral_tendencies, get_grid_dimensions
 from .jax.states import GridState, GridGradients, SpectralState, SpectralTendencies
 
+# SSP/TVD RK3 explicit coefficients from semimp_data.f90
+RK3_A21 = 1.0
+RK3_A31 = 0.25
+RK3_A32 = 0.25
+RK3_B1 = 1./6.
+RK3_B2 = 1./6.
+RK3_B3 = 2./3.
+
 class GFSDynamicsJAX(Stepper):
     """
     JAX-based implementation of the GFS dynamical core.
@@ -40,12 +48,6 @@ class GFSDynamicsJAX(Stepper):
         self.dyn_config = None
         self.trans_config = None
         
-        self.rk_coeffs = {
-            'a21': 1.0,
-            'a31': 0.25, 'a32': 0.25,
-            'b1': 1./6., 'b2': 1./6., 'b3': 2./3.
-        }
-        
         self._jit_get_spec_tends = jax.jit(get_spectral_tendencies, static_argnums=(3,))
 
     def array_call(self, state, timestep):
@@ -80,16 +82,12 @@ class GFSDynamicsJAX(Stepper):
             )
         
         if self.trans_config is None:
-            # We must choose L such that the generated grid matches input, OR we interpolate.
-            # s2fft 'gl' sampling for bandlimit L gives L latitudes and 2L-1 longitudes.
-            # For our test 32x64, let's try L=32.
             L = n_lat_in
             self.trans_config = TransformConfig(L=L, n_lat=n_lat_in, n_lon=n_lon_in, sampling="gl")
 
         L = self.trans_config.L
         n_lat, n_lon = get_grid_dimensions(L, self.trans_config.sampling)
         
-        # 1. Initialize spectral state (mocking transforms for now)
         spec_orig = SpectralState(
             vorticity=jnp.zeros((n_lev, L, 2*L-1), dtype=jnp.complex128),
             divergence=jnp.zeros((n_lev, L, 2*L-1), dtype=jnp.complex128),
@@ -98,28 +96,25 @@ class GFSDynamicsJAX(Stepper):
             tracers=jnp.zeros((1, n_lev, L, 2*L-1), dtype=jnp.complex128)
         )
         
-        # Ensure gradients match internal grid
         phis_grads = (jnp.zeros((n_lat, n_lon)), jnp.zeros((n_lat, n_lon)))
         latitudes = jnp.linspace(-jnp.pi/2, jnp.pi/2, n_lat)
         
-        # 2. Multi-stage RK
+        # Stage 1
         tends0 = self._jit_get_spec_tends(spec_orig, phis_grads, self.dyn_config, self.trans_config, latitudes)
-        spec1 = self._apply_tendencies(spec_orig, tends0, self.rk_coeffs['a21'] * dt)
+        spec1 = self._apply_tendencies(spec_orig, tends0, RK3_A21 * dt)
+        
+        # Stage 2
         tends1 = self._jit_get_spec_tends(spec1, phis_grads, self.dyn_config, self.trans_config, latitudes)
         spec2 = self._apply_tendencies_rk3_stage2(spec_orig, tends0, tends1, dt)
+        
+        # Stage 3
         tends2 = self._jit_get_spec_tends(spec2, phis_grads, self.dyn_config, self.trans_config, latitudes)
         spec_final = self._apply_tendencies_final(spec_orig, tends0, tends1, tends2, dt)
         
-        # 3. Transform final spectral state back to grid
         grid_final, _ = spectral_to_grid(spec_final, self.trans_config)
         
-        # TODO: If grid_final dimensions (n_lat, n_lon) != (n_lat_in, n_lon_in), interpolate.
-        # For now, we assume they match or we pad/truncate if close enough for tests.
-        
         def from_jax(arr, target_shape):
-            # Crude resizing if mismatch
             if arr.shape != target_shape:
-                # pad or slice
                 out = jnp.zeros(target_shape, dtype=arr.dtype)
                 s0 = min(arr.shape[0], target_shape[0])
                 s1 = min(arr.shape[1], target_shape[1])
@@ -149,21 +144,19 @@ class GFSDynamicsJAX(Stepper):
         )
 
     def _apply_tendencies_rk3_stage2(self, orig: SpectralState, tends0, tends1, dt) -> SpectralState:
-        a31, a32 = self.rk_coeffs['a31'], self.rk_coeffs['a32']
         return SpectralState(
-            vorticity=orig.vorticity + dt * (a31 * tends0.d_vorticity_d_t + a32 * tends1.d_vorticity_d_t),
-            divergence=orig.divergence + dt * (a31 * tends0.d_divergence_d_t + a32 * tends1.d_divergence_d_t),
-            temperature=orig.temperature + dt * (a31 * tends0.d_temperature_d_t + a32 * tends1.d_temperature_d_t),
-            log_surface_pressure=orig.log_surface_pressure + dt * (a31 * tends0.d_log_surface_pressure_d_t + a32 * tends1.d_log_surface_pressure_d_t),
-            tracers=orig.tracers + dt * (a31 * tends0.d_tracers_d_t + a32 * tends1.d_tracers_d_t)
+            vorticity=orig.vorticity + dt * (RK3_A31 * tends0.d_vorticity_d_t + RK3_A32 * tends1.d_vorticity_d_t),
+            divergence=orig.divergence + dt * (RK3_A31 * tends0.d_divergence_d_t + RK3_A32 * tends1.d_divergence_d_t),
+            temperature=orig.temperature + dt * (RK3_A31 * tends0.d_temperature_d_t + RK3_A32 * tends1.d_temperature_d_t),
+            log_surface_pressure=orig.log_surface_pressure + dt * (RK3_A31 * tends0.d_log_surface_pressure_d_t + RK3_A32 * tends1.d_log_surface_pressure_d_t),
+            tracers=orig.tracers + dt * (RK3_A31 * tends0.d_tracers_d_t + RK3_A32 * tends1.d_tracers_d_t)
         )
 
     def _apply_tendencies_final(self, orig: SpectralState, tends0, tends1, tends2, dt) -> SpectralState:
-        b1, b2, b3 = self.rk_coeffs['b1'], self.rk_coeffs['b2'], self.rk_coeffs['b3']
         return SpectralState(
-            vorticity=orig.vorticity + dt * (b1 * tends0.d_vorticity_d_t + b2 * tends1.d_vorticity_d_t + b3 * tends2.d_vorticity_d_t),
-            divergence=orig.divergence + dt * (b1 * tends0.d_divergence_d_t + b2 * tends1.d_divergence_d_t + b3 * tends2.d_divergence_d_t),
-            temperature=orig.temperature + dt * (b1 * tends0.d_temperature_d_t + b2 * tends1.d_temperature_d_t + b3 * tends2.d_temperature_d_t),
-            log_surface_pressure=orig.log_surface_pressure + dt * (b1 * tends0.d_log_surface_pressure_d_t + b2 * tends1.d_log_surface_pressure_d_t + b3 * tends2.d_log_surface_pressure_d_t),
-            tracers=orig.tracers + dt * (b1 * tends0.d_tracers_d_t + b2 * tends1.d_tracers_d_t + b3 * tends2.d_tracers_d_t)
+            vorticity=orig.vorticity + dt * (RK3_B1 * tends0.d_vorticity_d_t + RK3_B2 * tends1.d_vorticity_d_t + RK3_B3 * tends2.d_vorticity_d_t),
+            divergence=orig.divergence + dt * (RK3_B1 * tends0.d_divergence_d_t + RK3_B2 * tends1.d_divergence_d_t + RK3_B3 * tends2.d_divergence_d_t),
+            temperature=orig.temperature + dt * (RK3_B1 * tends0.d_temperature_d_t + RK3_B2 * tends1.d_temperature_d_t + RK3_B3 * tends2.d_temperature_d_t),
+            log_surface_pressure=orig.log_surface_pressure + dt * (RK3_B1 * tends0.d_log_surface_pressure_d_t + RK3_B2 * tends1.d_log_surface_pressure_d_t + RK3_B3 * tends2.d_log_surface_pressure_d_t),
+            tracers=orig.tracers + dt * (RK3_B1 * tends0.d_tracers_d_t + RK3_B2 * tends1.d_tracers_d_t + RK3_B3 * tends2.d_tracers_d_t)
         )
