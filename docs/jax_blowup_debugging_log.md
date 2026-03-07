@@ -228,46 +228,106 @@ Step  36:  974.4 – 1004.9 hPa
 The caching reduces redundant work and is still correct to keep, but the divergence
 is driven by a different numerical error in the dynamics.
 
+### H5. Coriolis term has wrong sign, magnitude, or latitude convention — RULED OUT ❌
+
+**Hypothesis**: The Coriolis parameter `f = 2Ω sin(φ)` in `assemble_grid_tendencies()`
+might use the wrong latitude convention (geographic vs colatitude), wrong sign, or be
+applied incorrectly in the absolute-vorticity flux vectors. Because Coriolis directly
+couples `u` and `v`, an error here would preferentially corrupt `v` while leaving `T`
+relatively unaffected — matching the observed one-step error pattern.
+
+**Investigation**: Full line-by-line trace of the Fortran flux assembly in
+`dyn_run.f90` (lines 316–364) against the JAX `assemble_grid_tendencies()`.
+
+**Latitude convention — confirmed identical:**
+- Fortran (`shtns.f90` L178–182): `lats1 = cos(colatitude)` via `shtns_cos_array`,
+  then `lats = asin(lats1)` = geographic latitude φ in radians.
+- JAX (`transforms.py` → `get_gaussian_latitudes`): `latitudes = π/2 − arccos(cos_θ)`
+  from `numpy.polynomial.legendre.leggauss` = geographic latitude φ in radians.
+  Both evaluate `sin(φ)`, giving the same `f` at every grid point.
+
+**Flux construction — confirmed identical:**
+
+Fortran (with variable lifetimes resolved — `dlnpsdx` is repurposed as scratch for `f`):
+```fortran
+dlnpsdx  = 2.*omega*sin(lats)
+prsgx(:,:,k) = u*(vorticity + f) + (vadv_v - pgf_y)   ! u_flux
+prsgy(:,:,k) = v*(vorticity + f) - (vadv_u - pgf_x)   ! v_flux
+```
+JAX:
+```python
+f        = 2.0 * config.omega * jnp.sin(latitudes)
+abs_vort = vort + f[None, :, None]
+u_flux   = u * abs_vort + (vadv_v - pgf_y)
+v_flux   = v * abs_vort - (vadv_u - pgf_x)
+```
+Sign, formula, and broadcasting all match exactly.
+
+**Tendency assignment — confirmed identical:**
+
+Fortran calls `getvrtdivspec(prsgx, prsgy, ddivspecdt, dvrtspecdt)` where, by SHTNS
+convention, the 3rd argument receives the **curl** and the 4th receives the
+**divergence** of the input vector. The 4th is then negated:
+```
+ddivspecdt = curl(u_flux, v_flux)    → divergence tendency
+dvrtspecdt = −div(u_flux, v_flux)   → vorticity tendency
+```
+JAX `grid_to_spectral_tendencies()`:
+```python
+d_div  = curl_of_flux
+d_vort = −div_of_flux
+```
+Identical.
+
+**Resolution**: The Coriolis term is definitively correct. It is not the source
+of the divergence.
+
+**Note on the reported "3300% v-error"**: The DCMIP initial `v` (northward wind)
+is nearly zero — it is a near-zonal flow. The large *relative* error in `v` after
+one step is dominated by a near-zero denominator, not a large absolute error. The
+absolute error in `v` after a single grid→spectral→grid round-trip is only
+~1.5×10⁻³ m/s (measured in CHECK 0c of `check_conj_symmetry_in_model.py`). The
+33× ratio is therefore misleading as a signal of a specific component failure.
+
 ---
 
 ## What is Still Unknown (Active Search Space)
 
 The divergence is confirmed to be a numerical accuracy issue in the dynamics
-itself, not a transform infrastructure problem. The one-step comparison
-(`examples/compare_one_step.py`) showed:
+itself, not in the transform infrastructure or the Coriolis term. The two
+highest-priority remaining suspects are:
 
-| Field | JAX vs Fortran max|diff| / max|val| |
-|-------|--------------------------------------|
-| `u`   | ~0.9% (factor 1.16)  — relatively OK |
-| `v`   | ~3300% (factor 33.0) — **massively wrong** |
-| `T`   | ~0.9% — relatively OK                |
+### Suspect 1 (HIGH): `compute_pressure_gradient_force` vs Fortran `getpresgrad`
 
-The extreme error in `v` after just one step (even though the transforms are
-confirmed correct) points to a sign or coefficient error somewhere in the
-**momentum (vorticity/divergence) tendency computation**. Candidate areas:
+`compute_pressure_gradient_force()` in `dynamics.py` is the most complex function
+in the JAX port and has **never been directly validated** against the Fortran
+`getpresgrad` subroutine. It computes `pgf_x` and `pgf_y` — the horizontal
+pressure gradient force that enters both momentum flux vectors. A sign or
+coefficient error here would inject a systematic per-step error that grows over
+time, consistent with the observed behaviour.
 
-1. **Coriolis terms** — sign or latitude-convention error in `compute_coriolis()`
-   in `dynamics.py`. This directly couples `u` and `v`, so an error here would
-   produce large `v` errors while leaving `u` and `T` comparatively unaffected.
+The function computes a hydrostatic integral involving `alfa`, `rlnp`, `bk`, `pk`,
+`dpk` and temperature gradients. The level-indexing conventions (bottom-to-top in
+JAX vs top-to-bottom in Fortran) must be carefully accounted for in every cumsum
+and einsum. This is the most likely place for a subtle indexing or sign error.
 
-2. **Divergence tendency from flux divergence** — `grid_to_spectral_tendencies()`
-   computes `d_vort/dt = -div(flux)` and `d_div/dt = curl(flux)`. A sign swap
-   between these two (or wrong assignment of which spin result is which) would
-   cause growing `v` errors.
+### Suspect 2 (MEDIUM): `compute_vertical_velocities` vs Fortran `getomega`
 
-3. **Geopotential/pressure gradient** — the hydrostatic balance term coupling
-   divergence tendency to temperature and log-surface-pressure. If the
-   `amhyb`, `bmhyb`, `tor_hyb` matrices have a sign or index error, this would
-   cause divergence errors that project onto `v` through the inverse transform.
+`compute_vertical_velocities()` computes `etadot` and `omega` (the vertical
+velocity diagnostics that feed into vertical advection and the energy conversion
+term). The Fortran `getomega` uses top-to-bottom indexing for `etadot` while the
+JAX code uses bottom-to-top. While a previous fix corrected the *advection*
+stencil signs, the `etadot` *magnitude* and intermediate `dlnpdtg` values have
+not been cross-validated against Fortran numerically.
 
-4. **Momentum flux construction** — in `dynamics.py` `compute_momentum_fluxes()`
-   or equivalent. The u-flux and v-flux are constructed from the nonlinear
-   advection terms; a transposition or sign error there would show up as large
-   `v` errors.
+### Suspect 3 (LOWER): Semi-implicit matrix ordering in `init_semi_implicit_matrices`
 
-5. **Semi-implicit solve** — the `d_hyb_m` matrix inversion in `stepper.py` may
-   have an index ordering mismatch. Fortran stores arrays column-major; the JAX
-   einsum indices need to account for this precisely.
+The `d_hyb_m` inversion and the `amhyb`/`bmhyb` matrices involve level-indexed
+linear algebra that maps Fortran column-major top-to-bottom arrays to JAX
+row-major bottom-to-top arrays. A transposition or index-reversal error in these
+matrices would affect the divergence and temperature tendencies in the implicit
+solve, causing the simulation to diverge. This has been inspected but not
+numerically validated at the matrix-element level.
 
 ---
 
@@ -304,14 +364,14 @@ advances the model.
 
 | Component | Status |
 |-----------|--------|
-| `jax/dynamics.py` | Vertical advection sign fixed; Coriolis and flux terms **untested at step level** |
-| `jax/transforms.py` | Forward vector transform fixed (dual-spin); Inverse transform correct as-is |
-| `jax/stepper.py` | JIT tracer guard added; IMEX RK structure matches Fortran **by inspection only** |
+| `jax/dynamics.py` | Vertical advection sign fixed; Coriolis confirmed correct (matches Fortran exactly); `compute_pressure_gradient_force` and `compute_vertical_velocities` **not yet numerically validated vs Fortran** |
+| `jax/transforms.py` | Forward vector transform fixed (dual-spin); inverse transform correct as-is |
+| `jax/stepper.py` | JIT tracer guard added; IMEX RK structure matches Fortran by inspection; semi-implicit matrices **not yet validated at element level** |
 | `component_jax.py` | Spectral state caching added; no more repeated round-trips |
 | `tests/test_jax_dynamics.py` | Updated for corrected vertical advection signs |
 | `tests/test_jax_transforms.py` | Passes for conjugate-symmetric inputs (correct) |
 
 ---
 
-*Last updated: during session investigating JAX vs Fortran baroclinic wave divergence.*
+*Last updated: Coriolis term verified correct and ruled out as blow-up cause (H5). Active suspects: `compute_pressure_gradient_force` (HIGH) and `compute_vertical_velocities` (MEDIUM).*
 *Branch: `develop`.*
