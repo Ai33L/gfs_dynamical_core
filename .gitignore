@@ -78,3 +78,10 @@ target/
 .ipynb_checkpoints/
 .configured_fftw
 .configured_sht
+examples/debug_data/
+debug_data/
+*.bin
+*.orig
+*.rej
+*.patch
+*.png

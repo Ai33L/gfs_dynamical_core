@@ -30,8 +30,9 @@ implicit none
 private
 
 real(c_double) :: t
+integer :: debug_step_count = 0
 bind(c) :: t
-public :: take_one_step, t
+public :: take_one_step, t, dump_intermediate
 
 contains
 
@@ -54,6 +55,7 @@ subroutine take_one_step() bind(c,name='gfs_take_one_step')
     call system_clock(count, count_rate, count_max)
     t1 = count*1.d0/count_rate
     ! advance solution with RK
+    debug_step_count = debug_step_count + 1
     call advance(t)
     fh = t/3600.
     t = t + dt ! absolute forecast time.
@@ -141,6 +143,7 @@ subroutine advance(t)
   call system_clock(count, count_rate, count_max)
   t1 = count*1.d0/count_rate
   call getdyntend(dvrtspecdt_orig,ddivspecdt_orig,dvirtempspecdt_orig,dtracerspecdt_orig,dlnpsspecdt_orig,1)
+  call dump_intermediate(0)
   call system_clock(count, count_rate, count_max)
   t2 = count*1.d0/count_rate
 
@@ -185,6 +188,7 @@ subroutine advance(t)
 !$omp end parallel do 
   endif
 
+  call dump_intermediate(1)
   ! stage 2
   ! compute dynamics tendencies.
   call system_clock(count, count_rate, count_max)
@@ -242,6 +246,7 @@ subroutine advance(t)
 !$omp end parallel do 
   endif
 
+  call dump_intermediate(2)
   ! stage 3
   ! compute dynamics tendencies.
   call system_clock(count, count_rate, count_max)
@@ -370,6 +375,52 @@ subroutine advance(t)
      end if
   end if
 
+  call dump_intermediate(3)
 end subroutine advance
+
+
+
+
+subroutine dump_intermediate(stage)
+    use grid_data, only: ug, vg, virtempg, lnpsg, tracerg
+    use spectral_data, only: vrtspec, divspec, virtempspec, lnpsspec, tracerspec
+    use shtns, only: spectogrd, getuv
+    use params, only: nlevs, ntrac
+    use physcons, only: rerth => con_rerth
+    integer, intent(in) :: stage
+    character(len=100) :: filename
+    integer :: unit_num, k, nt
+
+    if (debug_step_count > 100) return
+
+    ! Update grid arrays from spectral before dumping
+    do k=1,nlevs
+        call getuv(vrtspec(:,k),divspec(:,k),ug(:,:,k),vg(:,:,k),rerth)
+        call spectogrd(virtempspec(:,k),virtempg(:,:,k))
+        do nt=1,ntrac
+            call spectogrd(tracerspec(:,k,nt),tracerg(:,:,k,nt))
+        enddo
+    enddo
+    call spectogrd(lnpsspec, lnpsg)
+
+    write(filename, '(A,I0,A,I0,A)') 'debug_data/fortran_step_', debug_step_count, '_stage_', stage, '.bin'
+    unit_num = 100 + stage
+    open(unit=unit_num, file=trim(filename), form='unformatted', access='stream', status='replace')
+    
+    write(unit_num) ug
+    write(unit_num) vg
+    write(unit_num) virtempg
+    write(unit_num) lnpsg
+    write(unit_num) tracerg
+    
+    ! Add spectral fields (packed triangular, complex128)
+    write(unit_num) vrtspec
+    write(unit_num) divspec
+    write(unit_num) virtempspec
+    write(unit_num) lnpsspec
+    
+    close(unit_num)
+end subroutine dump_intermediate
+
 
 end module run_mod

@@ -1,9 +1,11 @@
 import os
+
 os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["JAX_ENABLE_X64"] = "True"
 
 import jax
 from jax import config
+
 config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
@@ -93,10 +95,10 @@ def test_vertical_advection():
     etadot = etadot.at[-1].set(0.0)
     dp = jnp.full((n_lev, n_lat, n_lon), 1000.0)
     vadv = compute_vertical_advection(data, etadot, dp)
-    np.testing.assert_allclose(vadv[1:-1], 1e-4, atol=1e-12)
+    np.testing.assert_allclose(vadv[1:-1], -1e-4, atol=1e-12)
     # Check boundaries
-    np.testing.assert_allclose(vadv[0], 0.5e-4, atol=1e-12)
-    np.testing.assert_allclose(vadv[-1], 0.5e-4, atol=1e-12)
+    np.testing.assert_allclose(vadv[0], -0.5e-4, atol=1e-12)
+    np.testing.assert_allclose(vadv[-1], -0.5e-4, atol=1e-12)
 
 
 def test_vertical_advection_tracers():

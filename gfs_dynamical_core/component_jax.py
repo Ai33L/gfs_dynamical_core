@@ -72,6 +72,10 @@ class GFSDynamicsJAX(Stepper):
         self._pdryini = None
 
         self._jit_advance = advance
+        # Cached spectral state: only do grid_to_spectral once (for the
+        # initial condition).  After that, advance directly in spectral
+        # space to avoid repeated grid→spectral→grid round-trip errors.
+        self._spec_state = None
 
     def array_call(self, state, timestep):
         u = jnp.array(state["eastward_wind"])
@@ -160,18 +164,22 @@ class GFSDynamicsJAX(Stepper):
 
         L = self.trans_config.L
 
-        # Build grid state directly — arrays are already at native s2fft size
-        grid_orig = GridState(
-            u=u,
-            v=v,
-            temperature=temp,
-            vorticity=jnp.zeros_like(u),
-            divergence=jnp.zeros_like(u),
-            log_surface_pressure=jnp.log(ps),
-            tracers=jnp.stack([q], axis=0),
-        )
-
-        spec_orig = grid_to_spectral(grid_orig, self.trans_config)
+        # On the very first call, convert grid initial conditions to spectral
+        # space.  On subsequent calls, reuse the cached spectral state so we
+        # never do the lossy grid→spectral round-trip again.
+        if self._spec_state is None:
+            grid_orig = GridState(
+                u=u,
+                v=v,
+                temperature=temp,
+                vorticity=jnp.zeros_like(u),
+                divergence=jnp.zeros_like(u),
+                log_surface_pressure=jnp.log(ps),
+                tracers=jnp.stack([q], axis=0),
+            )
+            spec_orig = grid_to_spectral(grid_orig, self.trans_config)
+        else:
+            spec_orig = self._spec_state
 
         # Compute phis gradients on the native grid (once, since topography is static)
         if self._phis_grads is None:
@@ -229,6 +237,10 @@ class GFSDynamicsJAX(Stepper):
             self._gauss_weights,
             self._pdryini,
         )
+
+        # Cache the spectral state for the next call so we never re-do
+        # grid→spectral (which would accumulate truncation error).
+        self._spec_state = spec_final
 
         grid_final, _ = spectral_to_grid(spec_final, self.trans_config)
 

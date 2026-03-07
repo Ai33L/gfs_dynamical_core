@@ -15,7 +15,12 @@ from .transforms import spectral_to_grid
 def dump_jax_intermediate(grid_state, spec_state, step, stage):
     if step > 100:
         return
+    # Skip when running inside JIT — traced arrays cannot be converted to numpy
+    if isinstance(grid_state.u, jax.core.Tracer):
+        return
     filename = f"debug_data/jax_step_{step}_stage_{stage}.bin"
+    if not os.path.isdir(os.path.dirname(filename)):
+        return
 
     # Strictly match Fortran layout: (nlons, nlats, nlevs) or (nlons, nlats)
     # JAX u is (levels, lat, lon) -> transpose(2, 1, 0) -> (lon, lat, levels)

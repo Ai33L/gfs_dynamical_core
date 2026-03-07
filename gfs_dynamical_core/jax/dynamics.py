@@ -156,13 +156,28 @@ def compute_vertical_advection(
     Standardized to BOTTOM-TO-TOP indexing.
     """
     n_lev = data.shape[0]
-    # Matches Fortran getvadv: vadv(k) = (0.5/dp(k)) * (etadot(k+1)*(data(k+1)-data(k)) + etadot(k)*(data(k)-data(k-1)))
-    # In bottom-to-top indexing, "above" means index+1.
-    vadv_bot = (0.5 / dp[0]) * etadot[1] * (data[1] - data[0])
-    vadv_top = (0.5 / dp[-1]) * etadot[-2] * (data[-1] - data[-2])
+    # Fortran getvadv has datag bottom-to-top but etadot TOP-to-bottom.
+    # The Fortran middle-layer formula (TTB index k) is:
+    #   vadv(nlevs+1-k) = (0.5/dpk(k)) * (
+    #       etadot(k+1) * (datag(nlevs-k)   - datag(nlevs+1-k))
+    #     + etadot(k)   * (datag(nlevs+1-k) - datag(nlevs+2-k)))
+    #
+    # Converting to all-BTU (layer j, 0-based):
+    #   etadot_TTB(k+1) -> etadot_BTU[j]   (interface BELOW layer j)
+    #   etadot_TTB(k)   -> etadot_BTU[j+1] (interface ABOVE layer j)
+    #   datag(nlevs-k)    = data[j-1]       (layer BELOW in BTU)
+    #   datag(nlevs+1-k)  = data[j]         (current layer)
+    #   datag(nlevs+2-k)  = data[j+1]       (layer ABOVE in BTU)
+    #
+    # So the correct all-BTU formula is:
+    #   vadv[j] = (0.5/dp[j]) * (
+    #       etadot[j]   * (data[j-1] - data[j])
+    #     + etadot[j+1] * (data[j] - data[j+1]))
+    vadv_bot = (0.5 / dp[0]) * etadot[1] * (data[0] - data[1])
+    vadv_top = (0.5 / dp[-1]) * etadot[-2] * (data[-2] - data[-1])
 
     vadv_mid = (0.5 / dp[1:-1]) * (
-        etadot[2:-1] * (data[2:] - data[1:-1]) + etadot[1:-2] * (data[1:-1] - data[:-2])
+        etadot[1:-2] * (data[:-2] - data[1:-1]) + etadot[2:-1] * (data[1:-1] - data[2:])
     )
     return jnp.concatenate([vadv_bot[None], vadv_mid, vadv_top[None]], axis=0)
 
