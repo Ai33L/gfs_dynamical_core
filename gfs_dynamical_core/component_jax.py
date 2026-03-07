@@ -1,11 +1,17 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 import s2fft
 from sympl import Stepper, get_constant
 
 from .jax.dynamics import DynamicsConfig
 from .jax.states import GridState
-from .jax.stepper import StepperConfig, advance
+from .jax.stepper import (
+    StepperConfig,
+    advance,
+    init_diffusion_operators,
+    init_semi_implicit_matrices,
+)
 from .jax.transforms import (
     TransformConfig,
     get_gaussian_latitudes,
@@ -61,8 +67,11 @@ class GFSDynamicsJAX(Stepper):
         self.stepper_config = None
         self._phis_grads = None
         self._latitudes = None
+        # Dry-mass fixer state (computed once from the initial state)
+        self._gauss_weights = None
+        self._pdryini = None
 
-        self._jit_advance = jax.jit(advance)
+        self._jit_advance = advance
 
     def array_call(self, state, timestep):
         u = jnp.array(state["eastward_wind"])
@@ -79,8 +88,15 @@ class GFSDynamicsJAX(Stepper):
         dt = timestep.total_seconds()
 
         if self.dyn_config is None:
-            dbk = bk_jnp[1:] - bk_jnp[:-1]
-            ck = ak_jnp[1:] * bk_jnp[:-1] - ak_jnp[:-1] * bk_jnp[1:]
+            # dbk = bk_below - bk_above (to be positive)
+            # bk is bottom-up: [1.0 (surf), ..., 0.0 (toa)]
+            # dbk[k] = bk_below - bk_above = bk[k] - bk[k+1]
+            dbk = bk_jnp[:-1] - bk_jnp[1:]
+            # ck[k] = ak_below*bk_above - ak_above*bk_below = ak[k]*bk[k+1] - ak[k+1]*bk[k]
+            # This matches the Fortran convention: ck(k) = ak(k+1)*bk(k) - ak(k)*bk(k+1)
+            # where Fortran ak/bk are top-to-bottom.  When mapped to bottom-to-top the
+            # sign flips, giving ak_btop[k]*bk_btop[k+1] - ak_btop[k+1]*bk_btop[k].
+            ck = ak_jnp[:-1] * bk_jnp[1:] - ak_jnp[1:] * bk_jnp[:-1]
 
             self.dyn_config = DynamicsConfig(
                 ak=ak_jnp,
@@ -113,7 +129,34 @@ class GFSDynamicsJAX(Stepper):
             )
 
         if self.stepper_config is None:
-            self.stepper_config = StepperConfig(dt=dt, explicit=True)
+            # Build a temporary default config to read the canonical IMEX
+            # coefficients (aa22, aa33, bb4) so the precomputed d_hyb_m
+            # matrices stay consistent with whatever StepperConfig uses.
+            _default_sc = StepperConfig(dt=dt)
+            # Compute semi-implicit matrices (mirrors Fortran init_semimpdata),
+            # passing coefficients explicitly to avoid hardcoding them.
+            si_matrices = init_semi_implicit_matrices(
+                self.dyn_config,
+                self.trans_config,
+                dt,
+                aa22=_default_sc.aa22,
+                aa33=_default_sc.aa33,
+                bb4=_default_sc.bb4,
+            )
+            # Compute hyper-diffusion and Rayleigh damping operators
+            diff_ops = init_diffusion_operators(self.dyn_config, self.trans_config, dt)
+            self.stepper_config = StepperConfig(
+                dt=dt,
+                explicit=False,
+                amhyb=si_matrices["amhyb"],
+                bmhyb=si_matrices["bmhyb"],
+                tor_hyb=si_matrices["tor_hyb"],
+                svhyb=si_matrices["svhyb"],
+                d_hyb_m=si_matrices["d_hyb_m"],
+                disspec=diff_ops["disspec"],
+                diff_prof=diff_ops["diff_prof"],
+                dmp_prof=diff_ops["dmp_prof"],
+            )
 
         L = self.trans_config.L
 
@@ -147,7 +190,35 @@ class GFSDynamicsJAX(Stepper):
         if self._latitudes is None:
             self._latitudes = get_gaussian_latitudes(L)
 
-        # Advance one timestep
+        # Gaussian quadrature weights (normalised, sum to 1) — needed by the
+        # dry-mass fixer.  Derived from the same leggauss nodes used by s2fft
+        # GL sampling so that the area integral is exact.
+        if self._gauss_weights is None:
+            _, raw_weights = np.polynomial.legendre.leggauss(L)
+            # leggauss returns weights summing to 2; normalise to sum to 1.
+            self._gauss_weights = jnp.array(raw_weights / 2.0)
+
+        # Initial global-mean DRY surface pressure (Pa) — computed once from
+        # the very first call's surface pressure and humidity fields.
+        # pdryini = pmean - g * pwat_global
+        #   where pwat = (1/g) * sum_k(q_k * dp_k) per column.
+        if self._pdryini is None:
+            from .jax.dynamics import compute_pressure_diagnostics
+
+            lnps_grid = jnp.log(ps)
+            press_diag_init = compute_pressure_diagnostics(lnps_grid, self.dyn_config)
+            q_init = jnp.array(q)  # (n_lev, n_lat, n_lon)
+            g = self.dyn_config.g
+            pwat_init = (
+                jnp.sum(q_init * press_diag_init.dp, axis=0) / g
+            )  # (n_lat, n_lon)
+            w = self._gauss_weights[:, None]  # (n_lat, 1)
+            pmean_init = float(jnp.sum(w * ps) / n_lon)
+            pwat_global_init = float(jnp.sum(w * pwat_init) / n_lon)
+            self._pdryini = pmean_init - g * pwat_global_init
+
+        # Advance one timestep (dry-mass fixer activated via gauss_weights +
+        # pdryini, matching Fortran run.f90 lines 349-356).
         spec_final = self._jit_advance(
             spec_orig,
             self._phis_grads,
@@ -155,6 +226,8 @@ class GFSDynamicsJAX(Stepper):
             self.trans_config,
             self.stepper_config,
             self._latitudes,
+            self._gauss_weights,
+            self._pdryini,
         )
 
         grid_final, _ = spectral_to_grid(spec_final, self.trans_config)

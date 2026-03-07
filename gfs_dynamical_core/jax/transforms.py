@@ -28,17 +28,36 @@ class TransformConfig:
 
     No external n_lat/n_lon needed; all grid-space arrays inside the
     dynamics pipeline use the native s2fft sizes.
+
+    The ``ntrunc`` parameter controls the *physical* triangular truncation
+    used for de-aliasing.  It defaults to ``int(n_lon / 3 - 2)`` which
+    matches the Fortran GFS convention and satisfies the standard 2/3
+    de-aliasing rule for quadratic nonlinearities.  Spectral arrays still
+    have shape ``(L, 2*L-1)`` but coefficients with ``l > ntrunc`` or
+    ``|m| > ntrunc`` are zeroed after every forward transform via
+    :func:`enforce_triangular_truncation`.
     """
 
-    L: int = struct.field(pytree_node=False)  # Bandlimit (truncation + 1)
+    L: int = struct.field(pytree_node=False)  # Bandlimit for s2fft transforms
     sampling: str = struct.field(
         pytree_node=False, default="gl"
     )  # Gauss-Legendre for GFS
+    ntrunc: int = struct.field(
+        pytree_node=False, default=None
+    )  # Physical truncation (de-aliased)
     radius: float = 6371000.0
 
     @property
     def truncation(self):
-        return self.L - 1
+        """Physical triangular truncation wavenumber (de-aliased).
+
+        Defaults to ``int(n_lon / 3 - 2)`` (the Fortran GFS convention)
+        when *ntrunc* is not explicitly set.
+        """
+        if self.ntrunc is not None:
+            return self.ntrunc
+        # Fortran GFS convention: ntrunc = int(nlons / 3 - 2)
+        return int(self.n_lon / 3 - 2)
 
     @property
     def n_lat(self):
@@ -93,12 +112,12 @@ def spectral_to_grid(
         grid_div = s2fft.inverse_jax(div, L, sampling=sampling)
 
         # 2. Vector transforms (vort, div -> u, v)
-        # F1_lm = (D_lm + i zeta_lm) / sqrt(l(l+1))
-        F1_lm = inv_l_factor[:, None] * (div + 1j * vort)
+        # F1_lm = (D_lm + i zeta_lm) * radius / sqrt(l(l+1))
+        F1_lm = inv_l_factor[:, None] * (div + 1j * vort) * radius
         f_spin1 = s2fft.inverse_jax(F1_lm, L, spin=1, sampling=sampling)
         # u = Imag(f_spin1), v = -Real(f_spin1)
-        grid_u = f_spin1.imag / radius
-        grid_v = -f_spin1.real / radius
+        grid_u = f_spin1.imag
+        grid_v = -f_spin1.real
 
         # 3. Tracers (scalar inverse transforms)
         grid_tracers = jax.vmap(
@@ -224,14 +243,31 @@ def grid_to_spectral(grid_state: GridState, config: TransformConfig) -> Spectral
         flm_temp = s2fft.forward_jax(temp, L, sampling=sampling)
 
         # 2. Vector transforms (u, v -> vort, div)
-        # f_spin1 = -v_meridional + i u_zonal
-        f_spin1 = -v + 1j * u
-        F1_lm = s2fft.forward_jax(f_spin1, L, spin=1, sampling=sampling)
+        # Use BOTH spin+1 and spin-1 forward transforms to correctly
+        # decompose divergence and vorticity spectral coefficients.
+        #
+        # spin+1 forward of (-v + i*u) gives F1_lm  where l_factor*F1/R  = D + i*zeta
+        # spin-1 forward of ( v + i*u) gives Fm1_lm where l_factor*Fm1/R = D - i*zeta
+        #
+        # For m=0, D_lm and zeta_lm are real, so a single transform and
+        # .real/.imag would suffice. But for m>=1 they are complex:
+        #   D_lm = a+bi, zeta_lm = c+di
+        #   D + i*zeta = (a-d) + i*(b+c)  -> .real/.imag loses information
+        #
+        # With both transforms we can solve exactly:
+        #   D_lm    = (result_p + result_m) / 2
+        #   zeta_lm = (result_p - result_m) / (2i)
+        f_plus = -v + 1j * u  # spin +1 input
+        f_minus = v + 1j * u  # spin -1 input
 
-        # D + i zeta = sqrt(l(l+1)) * F1_lm / radius
-        D_plus_izeta = l_factor[:, None] * F1_lm / radius
-        flm_div = D_plus_izeta.real
-        flm_vort = D_plus_izeta.imag
+        F1_lm = s2fft.forward_jax(f_plus, L, spin=1, sampling=sampling)
+        Fm1_lm = s2fft.forward_jax(f_minus, L, spin=-1, sampling=sampling)
+
+        result_p = l_factor[:, None] * F1_lm / radius  # D + i*zeta
+        result_m = l_factor[:, None] * Fm1_lm / radius  # D - i*zeta
+
+        flm_div = (result_p + result_m) / 2
+        flm_vort = (result_p - result_m) / (2j)
 
         # 3. Tracers
         flm_tracers = jax.vmap(lambda f: s2fft.forward_jax(f, L, sampling=sampling))(
@@ -297,14 +333,31 @@ def grid_to_spectral_tendencies(
     flm_tracers = jax.vmap(forward_tracers)(grid_tends.tracer_tends)
 
     def transform_vector_tendencies(u_flux, v_flux):
-        f_spin1 = -v_flux + 1j * u_flux
-        F1_lm = s2fft.forward_jax(f_spin1, L, spin=1, sampling=sampling)
+        # Use BOTH spin+1 and spin-1 forward transforms (same fix as
+        # grid_to_spectral) to correctly decompose the divergence and
+        # curl of the flux vector for all m values.
+        f_plus = -v_flux + 1j * u_flux  # spin +1 input
+        f_minus = v_flux + 1j * u_flux  # spin -1 input
 
-        # D_dot + i zeta_dot = sqrt(l(l+1)) * F1_lm
-        D_plus_izeta = l_factor[:, None] * F1_lm / radius
+        F1_lm = s2fft.forward_jax(f_plus, L, spin=1, sampling=sampling)
+        Fm1_lm = s2fft.forward_jax(f_minus, L, spin=-1, sampling=sampling)
 
-        d_div = D_plus_izeta.real
-        d_vort = D_plus_izeta.imag
+        result_p = l_factor[:, None] * F1_lm / radius  # div(flux) + i*curl(flux)
+        result_m = l_factor[:, None] * Fm1_lm / radius  # div(flux) - i*curl(flux)
+
+        div_of_flux = (result_p + result_m) / 2
+        curl_of_flux = (result_p - result_m) / (2j)
+
+        # The momentum equation tendencies are:
+        #   d(vorticity)/dt  = -div(flux)
+        #   d(divergence)/dt =  curl(flux)
+        #
+        # This matches the Fortran convention where getvrtdivspec computes
+        # (vort_of_flux, div_of_flux) and then:
+        #   ddivspecdt  =  vort_of_flux   (= curl of flux)
+        #   dvrtspecdt  = -div_of_flux    (sign-flipped divergence of flux)
+        d_vort = -div_of_flux
+        d_div = curl_of_flux
         return d_vort, d_div
 
     flm_vort, flm_div = jax.vmap(transform_vector_tendencies)(

@@ -1,11 +1,10 @@
-from jax import config
-
-config.update("jax_enable_x64", True)
-
 import os
-
 os.environ["JAX_PLATFORMS"] = "cpu"
+os.environ["JAX_ENABLE_X64"] = "True"
 
+import jax
+from jax import config
+config.update("jax_enable_x64", True)
 import copy
 from datetime import timedelta
 

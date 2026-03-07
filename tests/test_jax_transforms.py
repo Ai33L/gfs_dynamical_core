@@ -1,6 +1,9 @@
+import os
+os.environ["JAX_PLATFORMS"] = "cpu"
+os.environ["JAX_ENABLE_X64"] = "True"
+
 import jax
 from jax import config
-
 config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
@@ -45,7 +48,8 @@ def test_spectral_gradients():
 
 def test_vector_transforms():
     L = 8
-    config = TransformConfig(L=L, radius=1.0)
+    radius = 6371000.0
+    config = TransformConfig(L=L, radius=radius)
     n_lat, n_lon = config.n_lat, config.n_lon
 
     # Divergence = Y_1,0

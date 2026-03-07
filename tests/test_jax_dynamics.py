@@ -1,8 +1,10 @@
-from jax import config
-
-config.update("jax_enable_x64", True)
+import os
+os.environ["JAX_PLATFORMS"] = "cpu"
+os.environ["JAX_ENABLE_X64"] = "True"
 
 import jax
+from jax import config
+config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 
@@ -23,8 +25,8 @@ from gfs_dynamical_core.jax.transforms import get_gaussian_latitudes
 
 def get_mock_config(n_lev):
     ak = jnp.zeros(n_lev + 1)
-    bk = jnp.linspace(0, 1, n_lev + 1)
-    dbk = bk[1:] - bk[:-1]
+    bk = jnp.linspace(1.0, 0.0, n_lev + 1)
+    dbk = bk[:-1] - bk[1:]
     ck = ak[1:] * bk[:-1] - ak[:-1] * bk[1:]
 
     return DynamicsConfig(
@@ -51,7 +53,7 @@ def test_pressure_diagnostics():
     log_ps = jnp.full((n_lat, n_lon), jnp.log(101325.0))
     diag = compute_pressure_diagnostics(log_ps, config)
     assert diag.ps.shape == (n_lat, n_lon)
-    np.testing.assert_allclose(diag.pk[-1], diag.ps, atol=1e-8)
+    np.testing.assert_allclose(diag.pk[0], diag.ps, atol=1e-8)
 
 
 def test_vertical_velocities():
@@ -294,19 +296,19 @@ def test_rlnp_sentinel_no_nan():
     n_lat, n_lon = 4, 7
     config = get_mock_config(n_lev)
 
-    # Standard hybrid coordinate: bk[0] = ak[0] = 0 (pure-pressure top).
-    # This makes pk[0] = 0, so raw rlnp[0] = log(pk[1]/0) = +inf.
+    # Standard hybrid coordinate: bk[-1] = ak[-1] = 0 (pure-pressure top).
+    # This makes pk[-1] = 0, so raw rlnp[-1] = log(pk[-2]/0) = +inf.
     log_ps = jnp.full((n_lat, n_lon), jnp.log(101325.0))
     diag = compute_pressure_diagnostics(log_ps, config)
 
     # 1. Top interface pressure should be zero for pure-sigma with toa=0.
-    np.testing.assert_allclose(diag.pk[0], 0.0, atol=1e-10)
+    np.testing.assert_allclose(diag.pk[-1], 0.0, atol=1e-10)
 
-    # 2. Sentinel applied: rlnp[0] must be exactly 0.0.
+    # 2. Sentinel applied: rlnp[-1] must be exactly 0.0.
     np.testing.assert_array_equal(
-        np.array(diag.rlnp[0]),
+        np.array(diag.rlnp[-1]),
         np.zeros((n_lat, n_lon)),
-        err_msg="rlnp[0] sentinel not applied — expected 0.0, got inf or NaN",
+        err_msg="rlnp[-1] sentinel not applied — expected 0.0, got inf or NaN",
     )
 
     # 3. No NaN or Inf anywhere in the diagnostics.
@@ -376,8 +378,8 @@ def test_dry_mass_fixer_conserves_dry_mass():
     lnps_spec = s2fft.forward_jax(jnp.log(ps), L, sampling="gl")
 
     ak = jnp.zeros(n_lev + 1)
-    bk = jnp.linspace(0.0, 1.0, n_lev + 1)
-    dbk = bk[1:] - bk[:-1]
+    bk = jnp.linspace(1.0, 0.0, n_lev + 1)
+    dbk = bk[:-1] - bk[1:]
     ck = ak[1:] * bk[:-1] - ak[:-1] * bk[1:]
     dyn_config = DynamicsConfig(
         ak=ak,

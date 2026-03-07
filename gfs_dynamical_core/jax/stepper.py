@@ -1,11 +1,53 @@
+jax_debug_step = 0
+import os
 from typing import Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import struct
 
 from .dynamics import DynamicsConfig, get_spectral_tendencies
 from .states import SpectralState, SpectralTendencies
+from .transforms import spectral_to_grid
+
+
+def dump_jax_intermediate(grid_state, spec_state, step, stage):
+    if step > 100:
+        return
+    filename = f"debug_data/jax_step_{step}_stage_{stage}.bin"
+
+    # Strictly match Fortran layout: (nlons, nlats, nlevs) or (nlons, nlats)
+    # JAX u is (levels, lat, lon) -> transpose(2, 1, 0) -> (lon, lat, levels)
+    u_f = np.asfortranarray(np.array(grid_state.u).transpose(2, 1, 0), dtype=np.float64)
+    v_f = np.asfortranarray(np.array(grid_state.v).transpose(2, 1, 0), dtype=np.float64)
+    t_f = np.asfortranarray(
+        np.array(grid_state.temperature).transpose(2, 1, 0), dtype=np.float64
+    )
+    ps_f = np.asfortranarray(
+        np.array(grid_state.log_surface_pressure).transpose(1, 0), dtype=np.float64
+    )
+    q_f = np.asfortranarray(
+        np.array(grid_state.tracers).transpose(3, 2, 1, 0), dtype=np.float64
+    )
+
+    with open(filename, "wb") as f:
+        f.write(u_f.tobytes(order="F"))
+        f.write(v_f.tobytes(order="F"))
+        f.write(t_f.tobytes(order="F"))
+        f.write(ps_f.tobytes(order="F"))
+        f.write(q_f.tobytes(order="F"))
+
+        # Add spectral fields (rectangular layout, complex128)
+        # We'll save them as (levels, L, 2L-1) or (L, 2L-1)
+        f.write(np.array(spec_state.vorticity).astype(np.complex128).tobytes())
+        f.write(np.array(spec_state.divergence).astype(np.complex128).tobytes())
+        f.write(np.array(spec_state.temperature).astype(np.complex128).tobytes())
+        f.write(
+            np.array(spec_state.log_surface_pressure).astype(np.complex128).tobytes()
+        )
+
+
 from .transforms import TransformConfig
 
 
@@ -49,6 +91,269 @@ class StepperConfig:
     dt: float = 1200.0
 
 
+# ---------------------------------------------------------------------------
+# Semi-implicit matrix setup  (mirrors Fortran semimp_data.f90)
+# ---------------------------------------------------------------------------
+
+_REF_TEMP = 300.0  # K  — reference temperature for linearisation
+_REF_PRESS = 800.0e2  # Pa — reference surface pressure for linearisation
+
+
+def init_semi_implicit_matrices(
+    dyn_config: DynamicsConfig,
+    trans_config: TransformConfig,
+    dt: float,
+    aa22: float = 0.365,
+    aa33: float = 0.1825,
+    bb4: float = 0.35,
+) -> dict:
+    """Compute the IMEX semi-implicit matrices that match Fortran's ``init_semimpdata``.
+
+    The linearised terms treated implicitly are:
+
+    * **amhyb** — geopotential part of the linearised pressure-gradient force
+      (operates on virtual-temperature spectral coefficients).
+    * **bmhyb** — linearised energy-conversion term (operates on divergence
+      spectral coefficients).
+    * **tor_hyb** — ln(ps) contribution to the linearised PGF (multiplies
+      ``lnpsspec``; combined with ``amhyb`` in the divergence equation).
+    * **svhyb** — linearised ln(ps) tendency (multiplies divergence; continuity
+      equation).
+    * **d_hyb_m** — pre-inverted matrices ``(I + (c·dt)²·n(n+1)·Ym)⁻¹`` for
+      each implicit RK coefficient ``c ∈ {aa22, aa33, bb4}`` and each
+      spherical-harmonic degree ``n``.  Shape ``(3, L, n_lev, n_lev)``.
+
+    The returned dict has keys
+    ``amhyb, bmhyb, tor_hyb, svhyb, d_hyb_m`` — all plain ``jnp.ndarray``
+    values ready to be passed to :class:`StepperConfig`.
+
+    Parameters
+    ----------
+    dyn_config : DynamicsConfig
+        Must contain ``ak, bk, rd, cp, radius`` (and derived ``rk``).
+    trans_config : TransformConfig
+        Provides ``L`` (band-limit).
+    dt : float
+        Time-step in seconds.
+    aa22 : float
+        Diagonal implicit coefficient for stage 2.  Must match the value in
+        :class:`StepperConfig` that will use these matrices.  Default matches
+        ``StepperConfig.aa22 = 0.365``.
+    aa33 : float
+        Diagonal implicit coefficient for stage 3.  Default matches
+        ``StepperConfig.aa33 = 0.1825``.
+    bb4 : float
+        Diagonal implicit coefficient for the final combination stage.
+        Default matches ``StepperConfig.bb4 = 0.35``.
+
+    Returns
+    -------
+    dict[str, jnp.ndarray]
+    """
+    ak = np.asarray(dyn_config.ak, dtype=np.float64)
+    bk = np.asarray(dyn_config.bk, dtype=np.float64)
+    rd = float(dyn_config.rd)
+    kappa = float(dyn_config.rk)  # R_d / C_p
+    rerth = float(dyn_config.radius)
+    n_lev = len(ak) - 1
+    L = trans_config.L
+
+    # --- reference-state pressure diagnostics (Fortran bottom-to-top) ------
+    # Ensure ak_f, bk_f are top-to-bottom for the algorithm below
+    # (index 0 = TOA)
+    ak_f = ak[::-1]
+    bk_f = bk[::-1]
+
+    tref = np.full(n_lev, _REF_TEMP)
+    pkref = np.empty(n_lev + 1)
+    for k in range(n_lev + 1):
+        pkref[k] = ak_f[k] + bk_f[k] * _REF_PRESS
+    dpkref = np.empty(n_lev)
+    for k in range(n_lev):
+        dpkref[k] = pkref[k + 1] - pkref[k]
+    alfaref = np.empty(n_lev)
+    alfaref[0] = np.log(2.0)
+    for k in range(1, n_lev):
+        alfaref[k] = 1.0 - (pkref[k] / dpkref[k]) * np.log(pkref[k + 1] / pkref[k])
+
+    # --- yecm: geopotential operator (upper-triangular + diagonal) ---------
+    yecm = np.zeros((n_lev, n_lev))
+    for irow in range(n_lev):
+        yecm[irow, irow] = alfaref[irow] * rd
+        for icol in range(irow + 1, n_lev):
+            yecm[irow, icol] = rd * np.log(pkref[icol + 1] / pkref[icol])
+
+    # --- tecm: energy-conversion operator (lower-triangular + diagonal) ----
+    tecm = np.zeros((n_lev, n_lev))
+    for irow in range(n_lev):
+        tecm[irow, irow] = kappa * tref[irow] * alfaref[irow]
+        for icol in range(irow):
+            tecm[irow, icol] = (
+                kappa * tref[irow] * dpkref[icol] / dpkref[irow]
+            ) * np.log(pkref[irow + 1] / pkref[irow])
+
+    # --- vecm, svhyb (continuity equation linearisation) -------------------
+    vecm = dpkref / _REF_PRESS
+
+    # Flip to bottom-to-top to match the JAX state (index 0 = surface)
+    amhyb_f = np.zeros((n_lev, n_lev))
+    bmhyb_f = np.zeros((n_lev, n_lev))
+    svhyb_f = np.zeros(n_lev)
+    for j in range(n_lev):
+        svhyb_f[j] = vecm[n_lev - 1 - j]
+        for k in range(n_lev):
+            amhyb_f[k, j] = yecm[n_lev - 1 - k, n_lev - 1 - j]
+            bmhyb_f[k, j] = tecm[n_lev - 1 - k, n_lev - 1 - j]
+
+    amhyb_f = amhyb_f / rerth**2
+    tor_hyb_f = rd * tref / rerth**2
+
+    # --- ym = tor_hyb ⊗ svhyb + amhyb @ bmhyb  (wavenumber-independent) --
+    ym = np.outer(tor_hyb_f, svhyb_f) + amhyb_f @ bmhyb_f
+
+    # --- d_hyb_m: (I + (c·dt)²·n(n+1)·ym)⁻¹ for each stage & degree ------
+    # Coefficients are taken from the function parameters (not hardcoded) so
+    # that the matrices stay consistent with whichever StepperConfig uses them.
+    consts = [aa22, aa33, bb4]
+
+    # Fortran shape: (nlevs, nlevs, ntrunc+1, 3)
+    # JAX  shape:    (3, L, nlevs, nlevs)   with L = ntrunc + 1
+    d_hyb_m = np.zeros((3, L, n_lev, n_lev))
+    rim = np.eye(n_lev)
+
+    for stage_idx, const in enumerate(consts):
+        for nn in range(L):
+            n = nn  # degree
+            rnn1 = n * (n + 1.0)
+            mat = rim + (const * dt) ** 2 * rnn1 * ym
+            d_hyb_m[stage_idx, nn] = np.linalg.inv(mat)
+
+    return dict(
+        amhyb=jnp.array(amhyb_f),
+        bmhyb=jnp.array(bmhyb_f),
+        tor_hyb=jnp.array(tor_hyb_f),
+        svhyb=jnp.array(svhyb_f),
+        d_hyb_m=jnp.array(d_hyb_m),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hyper-diffusion & Rayleigh-damping setup  (mirrors Fortran setdampspec)
+# ---------------------------------------------------------------------------
+
+
+def init_diffusion_operators(
+    dyn_config: DynamicsConfig,
+    trans_config: TransformConfig,
+    dt: float,
+    number_of_damped_levels: int = 0,
+    damping_timescale: float = 2.0 * 86400,
+) -> dict:
+    """Compute hyper-diffusion and upper-level Rayleigh damping operators.
+
+    Mirrors Fortran ``setdampspec`` in ``dyn_init.f90``.
+
+    Returns a dict with keys ``disspec, diff_prof, dmp_prof``.
+
+    Parameters
+    ----------
+    dyn_config : DynamicsConfig
+        Must contain ``ak, bk, radius, toa_pressure``.
+    trans_config : TransformConfig
+        Provides ``L`` (band-limit, = ntrunc + 1).
+    dt : float
+        Time-step in seconds (used only for documentation; the operators
+        themselves are dt-independent).
+    number_of_damped_levels : int
+        Number of model levels from the top that are Rayleigh-damped.
+    damping_timescale : float
+        Rayleigh damping e-folding timescale in seconds.
+    """
+    ak = np.asarray(dyn_config.ak, dtype=np.float64)
+    bk = np.asarray(dyn_config.bk, dtype=np.float64)
+    rerth = float(dyn_config.radius)
+    toa_pressure = float(dyn_config.toa_pressure)
+    n_lev = len(ak) - 1
+    L = trans_config.L
+    ntrunc = trans_config.truncation
+
+    # Python arrays are now bottom-to-top
+    ak_f = ak
+    bk_f = bk
+
+    # Reference surface pressure for sigma computation
+    pdryini = 1.0e5  # 1000 hPa default — only used for sigma levels
+    # Sigma at interfaces (bottom-to-top in JAX convention)
+    # ak_f[k] is surface interface at k=0.
+    si = np.empty(n_lev + 1)
+    for k in range(n_lev + 1):
+        si[k] = (ak_f[k] - toa_pressure) / (pdryini - toa_pressure) + bk_f[k]
+    # Sigma at mid-levels
+    sl = np.empty(n_lev)
+    for k in range(n_lev):
+        sl[k] = 0.5 * (si[k] + si[k + 1])
+
+    # --- ndiss, efold, fshk (GFS defaults) ---------------------------------
+    ndiss = 8
+    hdif_fac = 1.0
+    hdif_fac2 = 1.0
+
+    if ntrunc > 170:
+        efold = 3600.0 / (hdif_fac2 * (ntrunc / 170.0) ** 4 * 1.1)
+    elif ntrunc == 126 or ntrunc == 170:
+        efold = 1.0 / (hdif_fac2 * 12.0e15 / rerth**4 * (80.0 * 81.0) ** 2)
+    else:
+        efold = 1.0 / (hdif_fac2 * 3.0e15 / rerth**4 * (80.0 * 81.0) ** 2)
+    efold = 2.0 * efold  # mysterious factor 2 in deldifs.f
+
+    if ntrunc > 170:
+        fshk = 2.2 * hdif_fac
+    elif ntrunc == 126:
+        fshk = 1.5 * hdif_fac
+    else:
+        fshk = 1.0 * hdif_fac
+
+    # --- diff_prof (height-dependent diffusion enhancement) ----------------
+    # Fortran: diff_prof = sl**(log(1./fshk))
+    diff_prof_f = sl ** np.log(1.0 / fshk)  # shape (n_lev,)
+
+    # --- dmp_prof (Rayleigh damping) ----------------------------------------
+    slrd0 = si[n_lev - number_of_damped_levels] if number_of_damped_levels > 0 else 0.0
+    dmp_prof1 = 1.0 / damping_timescale
+    dmp_prof_f = np.zeros(n_lev)
+    for k in range(n_lev):
+        if slrd0 > 0 and sl[k] < slrd0:
+            dmp_prof_f[k] = dmp_prof1 * np.log(slrd0 / sl[k])
+
+    # --- disspec (spectral hyper-diffusion operator) -----------------------
+    # Fortran uses 1-D packed triangular layout; we need 2-D (L, 2L-1).
+    # lap(l,m) = -l*(l+1);  Fortran's disspec = -(1/efold)*(lap/min(lap))^(ndiss/2)
+    # min(lap) = -ntrunc*(ntrunc+1) (most negative)
+    l_arr = np.arange(L, dtype=np.float64)
+    m_arr = np.arange(-L + 1, L, dtype=np.float64)
+    l_grid, m_grid = np.meshgrid(l_arr, m_arr, indexing="ij")
+
+    lap_2d = -(l_grid * (l_grid + 1.0))
+    min_lap = -(ntrunc * (ntrunc + 1.0))  # most negative value
+
+    # Avoid division by zero at l=0 (lap=0 there, disspec=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(min_lap != 0, lap_2d / min_lap, 0.0)
+    disspec_2d = -(1.0 / efold) * np.abs(ratio) ** (ndiss / 2)
+    # l=0 has lap=0, so disspec should be 0 there
+    disspec_2d[0, :] = 0.0
+
+    # Zero out entries outside triangular truncation (|m| > l or l > ntrunc)
+    mask = (l_grid <= ntrunc) & (np.abs(m_grid) <= l_grid)
+    disspec_2d = np.where(mask, disspec_2d, 0.0)
+
+    return dict(
+        disspec=jnp.array(disspec_2d),
+        diff_prof=jnp.array(diff_prof_f),
+        dmp_prof=jnp.array(dmp_prof_f),
+    )
+
+
 def advance(
     state: SpectralState,
     phis_grads: tuple[jnp.ndarray, jnp.ndarray],
@@ -76,6 +381,8 @@ def advance(
             applied to the lnps tendency at the final RK stage, matching
             Fortran run.f90 lines 349-356.
     """
+    global jax_debug_step
+    jax_debug_step += 1
     dt = stepper_config.dt
     L = trans_config.L
 
@@ -133,6 +440,8 @@ def advance(
         else {}
     )
 
+    grid_init, _ = spectral_to_grid(state, trans_config)
+    dump_jax_intermediate(grid_init, state, jax_debug_step, 0)
     # --- Stage 1 ---
     tends_orig = get_spectral_tendencies(
         state, phis_grads, dyn_config, trans_config, latitudes
@@ -187,6 +496,16 @@ def advance(
             d_tracers_d_t=tends_orig.d_tracers_d_t,
         )
 
+    grid1, _ = spectral_to_grid(
+        SpectralState(
+            vorticity=vort1,
+            divergence=div1,
+            temperature=temp1,
+            log_surface_pressure=lnps1,
+            tracers=tracers1,
+        ),
+        trans_config,
+    )
     state1 = SpectralState(
         vorticity=vort1,
         divergence=div1,
@@ -194,6 +513,8 @@ def advance(
         log_surface_pressure=lnps1,
         tracers=tracers1,
     )
+    grid1, _ = spectral_to_grid(state1, trans_config)
+    dump_jax_intermediate(grid1, state1, jax_debug_step, 1)
 
     # --- Stage 2 ---
     tends1 = get_spectral_tendencies(
@@ -265,6 +586,16 @@ def advance(
             d_tracers_d_t=tends1.d_tracers_d_t,
         )
 
+    grid2, _ = spectral_to_grid(
+        SpectralState(
+            vorticity=vort2,
+            divergence=div2,
+            temperature=temp2,
+            log_surface_pressure=lnps2,
+            tracers=tracers2,
+        ),
+        trans_config,
+    )
     state2 = SpectralState(
         vorticity=vort2,
         divergence=div2,
@@ -272,6 +603,8 @@ def advance(
         log_surface_pressure=lnps2,
         tracers=tracers2,
     )
+    grid2, _ = spectral_to_grid(state2, trans_config)
+    dump_jax_intermediate(grid2, state2, jax_debug_step, 2)
 
     # --- Stage 3 ---
     # Apply dry-mass fixer at the final stage if enabled (matches Fortran run.f90).
@@ -339,12 +672,13 @@ def advance(
             + stepper_config.bb3 * dlnpsdtlin2
         )
 
-        if jnp.abs(stepper_config.bb4) > 1e-5:
-            div3, temp3, lnps3 = solve_implicit(
-                div_expl, temp_expl, lnps_expl, stepper_config.bb4, 2
-            )
-        else:
-            div3, temp3, lnps3 = div_expl, temp_expl, lnps_expl
+        # Always run the implicit solve for the final stage.
+        # When bb4 == 0 the solve reduces to the identity (d_hyb_m == I),
+        # so this is safe and avoids a JIT-incompatible Python-level branch
+        # on a traced scalar.
+        div3, temp3, lnps3 = solve_implicit(
+            div_expl, temp_expl, lnps_expl, stepper_config.bb4, 2
+        )
 
     # Forward implicit linear damping/diffusion
     if stepper_config.disspec is not None and stepper_config.diff_prof is not None:
@@ -365,10 +699,13 @@ def advance(
         temp3 = temp3 / denom_temp_tracers
         tracers3 = tracers3 / denom_temp_tracers[None, :, :, :]
 
-    return SpectralState(
+    final_state = SpectralState(
         vorticity=vort3,
         divergence=div3,
         temperature=temp3,
         log_surface_pressure=lnps3,
         tracers=tracers3,
     )
+    grid3, _ = spectral_to_grid(final_state, trans_config)
+    dump_jax_intermediate(grid3, final_state, jax_debug_step, 3)
+    return final_state
