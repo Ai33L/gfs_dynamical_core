@@ -297,19 +297,19 @@ The divergence is confirmed to be a numerical accuracy issue in the dynamics
 itself, not in the transform infrastructure or the Coriolis term. The two
 highest-priority remaining suspects are:
 
-### Suspect 1 (HIGH): `compute_pressure_gradient_force` vs Fortran `getpresgrad`
+### Suspect 1 (HIGH): `compute_pressure_gradient_force` vs Fortran `getpresgrad` — PARTIALLY FIXED (Major driver, but not the final fix) ⚠️
 
-`compute_pressure_gradient_force()` in `dynamics.py` is the most complex function
-in the JAX port and has **never been directly validated** against the Fortran
-`getpresgrad` subroutine. It computes `pgf_x` and `pgf_y` — the horizontal
-pressure gradient force that enters both momentum flux vectors. A sign or
-coefficient error here would inject a systematic per-step error that grows over
-time, consistent with the observed behaviour.
+**Status**: Fixed. This was *a* major driver of the blow-up, but the simulation still blows up eventually. The short-term trajectory is now dramatically stabilized.
 
-The function computes a hydrostatic integral involving `alfa`, `rlnp`, `bk`, `pk`,
-`dpk` and temperature gradients. The level-indexing conventions (bottom-to-top in
-JAX vs top-to-bottom in Fortran) must be carefully accounted for in every cumsum
-and einsum. This is the most likely place for a subtle indexing or sign error.
+**Findings**: The `compute_pressure_gradient_force` function suffered from four distinct errors due to confusion between Fortran's split top-to-bottom/bottom-to-top indexing and JAX's strict bottom-to-top indexing:
+1. **Swapped Interfaces in `cofa`**: The `term1` and `cofa_coef` computations swapped the top and bottom interfaces of each layer.
+2. **Reversed Geopotential Integration**: The geopotential integral `px2_factor` was accumulating from TOA downwards, instead of from the surface upwards.
+3. **Wrong Sign**: The difference `bk_ratio_diff` used `top - bot` instead of `bot - top`.
+4. **Reversed Temperature Gradient Integration**: The `px3u` and `px3v` terms were accumulating from TOA downwards instead of surface upwards.
+
+**Fix**: Corrected all indexing and directions of integration (`jnp.cumsum`), swapping top/bottom bounds in coefficient formulas, and ensuring integrations correctly start at the surface and move upwards.
+
+**Verification**: `examples/compare_one_step.py` demonstrates the JAX surface pressure trajectory is now strictly stable over the first 10 steps, bounding between ~999.47 and 1000.53 hPa, mirroring Fortran's stability in the short term. However, long-term simulations (e.g., 24 hours) still eventually go unstable, indicating another bug remains.
 
 ### Suspect 2 (MEDIUM): `compute_vertical_velocities` vs Fortran `getomega`
 
@@ -328,6 +328,25 @@ row-major bottom-to-top arrays. A transposition or index-reversal error in these
 matrices would affect the divergence and temperature tendencies in the implicit
 solve, causing the simulation to diverge. This has been inspected but not
 numerically validated at the matrix-element level.
+
+---
+
+## Important Reference: Fortran vs JAX Array Orientations
+
+A major source of bugs in the JAX port has been the mismatched array orientations.
+- **JAX**: All level-dependent arrays are strictly **Bottom-to-Top** (index 0 is surface, index -1 is TOA).
+- **Fortran**: Uses a split convention where some arrays are Top-to-Bottom and others are Bottom-to-Top.
+
+When reading the Fortran source (`getpresgrad`, `getomega`, `getvadv`, etc.), remember:
+* **Top-to-Bottom (k=1 is TOA)**:
+  - Hybrid coefficients: `ak`, `bk`, `ck`, `dbk`
+  - Pressure diagnostics: `pk` (interfaces), `dpk`, `alfa`, `rlnp`
+  - Vertical velocity: `etadot` (interfaces)
+* **Bottom-to-Top (k=1 is Surface)**:
+  - Grid state: `ug`, `vg`, `virtempg`, `divg`, `vortg`, tracers
+  - Fluxes/Tendencies: `prsgx`, `prsgy`, `vadv` (all outputs of vertical advection)
+
+Any translation of Fortran loops involving both state arrays and pressure diagnostics must carefully map indices.
 
 ---
 

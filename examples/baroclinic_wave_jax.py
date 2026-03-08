@@ -46,23 +46,39 @@ def plot_baroclinic_wave(fig, state):
     # Surface Pressure
     ax1 = fig.add_subplot(2, 1, 1)
     ps = state["surface_air_pressure"].values / 100.0  # hPa
+    # Remove the zonal mean of surface pressure
+    ps_anomaly = ps - np.mean(ps, axis=1, keepdims=True)
+
     lon = state["longitude"].values
     lat = state["latitude"].values
     c1 = ax1.contourf(
-        lon, lat, ps, levels=np.linspace(940, 1020, 21), cmap="viridis", extend="both"
+        lon,
+        lat,
+        ps_anomaly,
+        levels=np.linspace(-30, 30, 21),
+        cmap="RdBu_r",
+        extend="both",
     )
-    fig.colorbar(c1, ax=ax1, label="Surface Pressure (hPa)")
-    ax1.set_title(f"Surface Pressure at {state['time']}")
+    fig.colorbar(c1, ax=ax1, label="Surface Pressure Anomaly (hPa)")
+    ax1.set_title(f"Surface Pressure Anomaly at {state['time']}")
     ax1.set_ylabel("Latitude")
 
     # Temperature at level 18 (near surface)
     ax2 = fig.add_subplot(2, 1, 2)
     temp = state["air_temperature"].values[18, :, :]
+    # Remove the zonal mean of temperature
+    temp_anomaly = temp - np.mean(temp, axis=1, keepdims=True)
+
     c2 = ax2.contourf(
-        lon, lat, temp, levels=np.linspace(240, 310, 21), cmap="RdBu_r", extend="both"
+        lon,
+        lat,
+        temp_anomaly,
+        levels=np.linspace(-20, 20, 21),
+        cmap="RdBu_r",
+        extend="both",
     )
-    fig.colorbar(c2, ax=ax2, label="Temperature (K)")
-    ax2.set_title("Temperature near surface (~950 hPa)")
+    fig.colorbar(c2, ax=ax2, label="Temperature Anomaly (K)")
+    ax2.set_title("Temperature Anomaly near surface (~950 hPa)")
     ax2.set_xlabel("Longitude")
     ax2.set_ylabel("Latitude")
 
@@ -70,14 +86,14 @@ def plot_baroclinic_wave(fig, state):
 
 
 # 5. Simulation Loop
-timestep = timedelta(minutes=5)
+timestep = timedelta(minutes=10)
 print(f"Starting simulation with dt = {timestep}")
 
 # Use PlotFunctionMonitor to save frames (or just save final)
 # monitor = PlotFunctionMonitor(plot_baroclinic_wave)
 
 try:
-    for i in range(288):  # Run for 24 hours (288 steps at 5 min)
+    for i in range(144 * 20):  # Run for 24 hours (144 steps at 10 min)
         # Check for stability
         ps_max = np.max(my_state["surface_air_pressure"].values)
         if ps_max > 2e5 or np.isnan(ps_max):
@@ -88,11 +104,16 @@ try:
         my_state.update(output)
         my_state["time"] += timestep
 
-        if i % 12 == 0:
+        if (i + 1) % 6 == 0:  # Every hour (6 steps of 10 mins)
             ps_min = np.min(my_state["surface_air_pressure"].values)
+            hour = (i + 1) // 6
             print(
-                f"Step {i:3d}, Time: {my_state['time']}, PS range: {ps_min / 100.0:.1f} - {ps_max / 100.0:.1f} hPa"
+                f"Hour {hour:2d}, Step {i + 1:3d}, Time: {my_state['time']}, PS range: {ps_min / 100.0:.1f} - {ps_max / 100.0:.1f} hPa"
             )
+            fig = plt.figure()
+            plot_baroclinic_wave(fig, my_state)
+            plt.savefig(f"baroclinic_wave_jax_hour_{hour:02d}.png")
+            plt.close(fig)
 
     print("Simulation complete.")
 

@@ -282,38 +282,40 @@ def compute_pressure_gradient_force(
     pk_bot = press_diag.pk[:-1]
     pk_top = press_diag.pk[1:]
 
-    term1 = bk_top * pk_bot / jnp.where(pk_top > 1e-10, pk_top, 1.0) - bk_bot
+    term1 = bk_bot * pk_top / jnp.where(pk_bot > 1e-10, pk_bot, 1.0) - bk_top
     # Guard against 0 * log(Inf) = NaN at TOA
-    cofa_coef = bk_bot - pk_bot * config.dbk[:, None, None] / press_diag.dp
+    cofa_coef = bk_top - pk_top * config.dbk[:, None, None] / press_diag.dp
     term2 = jnp.where(jnp.abs(cofa_coef) > 1e-15, press_diag.rlnp * cofa_coef, 0.0)
     cofa = -(1.0 / press_diag.dp) * (term1 + term2)
 
-    # px2_factor: geopotential integral of layers ABOVE
+    # px2_factor: geopotential integral of layers BELOW (Fortran accumulates from surface up)
     safe_pk = jnp.where(press_diag.pk > 1e-10, press_diag.pk, 1.0)
     bk_ratio = jnp.where(press_diag.pk > 1e-10, config.bk[:, None, None] / safe_pk, 0.0)
-    bk_ratio_diff = bk_ratio[1:] - bk_ratio[:-1]
+
+    # Correct sign for bk_ratio difference (bot - top)
+    bk_ratio_diff = bk_ratio[:-1] - bk_ratio[1:]
     delta_geo = -rd * bk_ratio_diff * virtual_temp
 
+    # Integrate from surface upwards (layers below)
     shifted_delta_geo = jnp.concatenate(
-        [delta_geo[1:], jnp.zeros_like(delta_geo[:1])], axis=0
+        [jnp.zeros_like(delta_geo[:1]), delta_geo[:-1]], axis=0
     )
-    px2_factor = jnp.flip(
-        jnp.cumsum(jnp.flip(shifted_delta_geo, axis=0), axis=0), axis=0
-    )
+    px2_factor = jnp.cumsum(shifted_delta_geo, axis=0)
 
-    # px3: cumulative temperature gradient of layers ABOVE
+    # px3: cumulative temperature gradient of layers BELOW
     integrand_x = -rd * press_diag.rlnp * grid_grads.d_t_d_lambda
     integrand_y = -rd * press_diag.rlnp * grid_grads.d_t_d_phi
 
+    # Integrate from surface upwards
     shifted_x = jnp.concatenate(
-        [integrand_x[1:], jnp.zeros_like(integrand_x[:1])], axis=0
+        [jnp.zeros_like(integrand_x[:1]), integrand_x[:-1]], axis=0
     )
     shifted_y = jnp.concatenate(
-        [integrand_y[1:], jnp.zeros_like(integrand_y[:1])], axis=0
+        [jnp.zeros_like(integrand_y[:1]), integrand_y[:-1]], axis=0
     )
 
-    px3u = jnp.flip(jnp.cumsum(jnp.flip(shifted_x, axis=0), axis=0), axis=0)
-    px3v = jnp.flip(jnp.cumsum(jnp.flip(shifted_y, axis=0), axis=0), axis=0)
+    px3u = jnp.cumsum(shifted_x, axis=0)
+    px3v = jnp.cumsum(shifted_y, axis=0)
 
     pgf_x = (
         cofb_pressure * rd * virtual_temp * ps[None, :, :] * dlnpsdx[None, :, :]
