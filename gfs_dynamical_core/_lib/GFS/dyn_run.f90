@@ -293,6 +293,27 @@ end subroutine gfs_uv_to_vrtdiv
                     prsgx,prsgy,&
                     vadvu,vadvv,vadvt,vadvq) ! work storage
 
+   ! --- DEBUG: dump PGF outputs and gradient inputs (one-shot) ---
+   block
+     logical, save :: pgf_dumped = .false.
+     integer :: iu
+     if (.not. pgf_dumped) then
+       pgf_dumped = .true.
+       open(newunit=iu, file='debug_data/fortran_pgf.bin', &
+            form='unformatted', access='stream', status='replace')
+       write(iu) nlons, nlats, nlevs
+       write(iu) prsgx        ! pgf_x (nlons,nlats,nlevs) BTU
+       write(iu) prsgy        ! pgf_y (nlons,nlats,nlevs) BTU
+       write(iu) dvirtempdx   ! dTdx  (nlons,nlats,nlevs) BTU
+       write(iu) dvirtempdy   ! dTdy  (nlons,nlats,nlevs) BTU
+       write(iu) dlnpsdx      ! (nlons,nlats)
+       write(iu) dlnpsdy      ! (nlons,nlats)
+       close(iu)
+       print *, 'DEBUG: Wrote fortran_pgf.bin'
+     endif
+   end block
+   ! --- END DEBUG ---
+
    ! get vertical advection terms  (input etadot is top to bottom)
    call getvadv(ug,etadot,vadvu)
    call getvadv(vg,etadot,vadvv)

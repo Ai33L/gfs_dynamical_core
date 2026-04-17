@@ -3,7 +3,12 @@ import jax.numpy as jnp
 from flax import struct
 
 from .states import GridGradients, GridState, SpectralState, SpectralTendencies
-from .transforms import TransformConfig, grid_to_spectral_tendencies, spectral_to_grid
+from .transforms import (
+    TransformConfig,
+    enforce_triangular_truncation,
+    grid_to_spectral_tendencies,
+    spectral_to_grid,
+)
 
 
 @struct.dataclass
@@ -194,22 +199,26 @@ def compute_vertical_advection_tracers(
     datag_half = 0.5 * (data[:-1] + data[1:])
     datag_d = data[1:] - data[:-1]
 
-    # Bottom boundary (i=0)
+    # Bottom boundary (i=0, surface side in BTU).
+    # Ghost value extrapolated below surface; sign must match interior
+    # convention (above minus below).
     data_bot = data[0]
     data_above_bot = data[1]
     datag_d_bot = jnp.where(
         data_bot >= 0,
-        jnp.maximum(0.0, 2.0 * data_bot - data_above_bot) - data_bot,
-        jnp.minimum(0.0, 2.0 * data_bot - data_above_bot) - data_bot,
+        data_bot - jnp.maximum(0.0, 2.0 * data_bot - data_above_bot),
+        data_bot - jnp.minimum(0.0, 2.0 * data_bot - data_above_bot),
     )
 
-    # Top boundary (i=n_lev)
+    # Top boundary (i=n_lev, TOA side in BTU).
+    # Ghost value extrapolated above TOA; sign must match interior
+    # convention (above minus below).
     data_top = data[-1]
     data_below_top = data[-2]
     datag_d_top = jnp.where(
         data_top >= 0,
-        data_top - jnp.maximum(0.0, 2.0 * data_top - data_below_top),
-        data_top - jnp.minimum(0.0, 2.0 * data_top - data_below_top),
+        jnp.maximum(0.0, 2.0 * data_top - data_below_top) - data_top,
+        jnp.minimum(0.0, 2.0 * data_top - data_below_top) - data_top,
     )
 
     datag_d_full = jnp.concatenate(
@@ -239,11 +248,10 @@ def compute_vertical_advection_tracers(
 
     datag_half_full = jnp.concatenate([data[:1], datag_half_limited, data[-1:]], axis=0)
 
-    # Tendency sign: flux_in - flux_out
-    # vadv = (1/dp) * (flux_above - flux_below)
+    # Tendency: (1/dp) * (F_bottom - F_top), matching Fortran getvadv_tracers
     vadv = (1.0 / dp) * (
-        (datag_half_full[1:] * etadot[1:] - datag_half_full[:-1] * etadot[:-1])
-        + data * (etadot[:-1] - etadot[1:])
+        (datag_half_full[:-1] * etadot[:-1] - datag_half_full[1:] * etadot[1:])
+        + data * (etadot[1:] - etadot[:-1])
     )
 
     return vadv
@@ -405,6 +413,7 @@ def compute_dry_mass_fixer(
     pdryini: float,
     g: float,
     dt: float,
+    ntrunc: int = None,
 ) -> jnp.ndarray:
     """Adjusts spectral lnps tendency to conserve dry surface pressure."""
     import s2fft
@@ -419,6 +428,10 @@ def compute_dry_mass_fixer(
     lnps_target_grid = jnp.log(ps * pcorr)
     L = log_surface_pressure.shape[0]
     lnps_target_spec = s2fft.forward_jax(lnps_target_grid, L, sampling="gl")
+    # Enforce triangular truncation to match Fortran's packed spectral storage.
+    # Without this, modes l > ntrunc receive no diffusion and accumulate noise.
+    if ntrunc is not None:
+        lnps_target_spec = enforce_triangular_truncation(lnps_target_spec, L, ntrunc)
     return (lnps_target_spec - log_surface_pressure) / dt
 
 
@@ -474,6 +487,7 @@ def get_spectral_tendencies(
             pdryini=pdryini,
             g=dyn_config.g,
             dt=dt,
+            ntrunc=trans_config.truncation,
         )
         spec_tends = SpectralTendencies(
             d_vorticity_d_t=spec_tends.d_vorticity_d_t,

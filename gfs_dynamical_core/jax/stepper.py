@@ -7,7 +7,12 @@ import jax.numpy as jnp
 import numpy as np
 from flax import struct
 
-from .dynamics import DynamicsConfig, get_spectral_tendencies
+from .dynamics import (
+    DynamicsConfig,
+    compute_dry_mass_fixer,
+    compute_pressure_diagnostics,
+    get_spectral_tendencies,
+)
 from .states import SpectralState, SpectralTendencies
 from .transforms import spectral_to_grid
 
@@ -300,8 +305,8 @@ def init_diffusion_operators(
 
     # --- ndiss, efold, fshk (GFS defaults) ---------------------------------
     ndiss = 8
-    hdif_fac = 1.0
-    hdif_fac2 = 1.0
+    hdif_fac = 2.0
+    hdif_fac2 = 2.0
 
     if ntrunc > 170:
         efold = 3600.0 / (hdif_fac2 * (ntrunc / 170.0) ** 4 * 1.1)
@@ -437,13 +442,6 @@ def advance(
         )
 
         return div_new, temp_new, lnps_new
-
-    # Dry-mass fixer is only applied at the final stage (mirrors Fortran behaviour).
-    _dmf_kwargs = (
-        dict(gauss_weights=gauss_weights, pdryini=pdryini, dt=dt)
-        if (gauss_weights is not None and pdryini is not None)
-        else {}
-    )
 
     grid_init, _ = spectral_to_grid(state, trans_config)
     dump_jax_intermediate(grid_init, state, jax_debug_step, 0)
@@ -612,9 +610,8 @@ def advance(
     dump_jax_intermediate(grid2, state2, jax_debug_step, 2)
 
     # --- Stage 3 ---
-    # Apply dry-mass fixer at the final stage if enabled (matches Fortran run.f90).
     tends2 = get_spectral_tendencies(
-        state2, phis_grads, dyn_config, trans_config, latitudes, **_dmf_kwargs
+        state2, phis_grads, dyn_config, trans_config, latitudes
     )
 
     vort3 = state.vorticity + dt * (
@@ -712,5 +709,34 @@ def advance(
         tracers=tracers3,
     )
     grid3, _ = spectral_to_grid(final_state, trans_config)
+
+    # Post-RK dry-mass fixer: applied after the complete IMEX RK scheme,
+    # matching Fortran run.f90 lines 357-360 (`if (massfix) then`).
+    # This must NOT run inside the RK stages — doing so corrupts the implicit
+    # gravity-wave solve by replacing the physical lnps tendency with ~0.
+    if gauss_weights is not None and pdryini is not None:
+        press_diag = compute_pressure_diagnostics(
+            grid3.log_surface_pressure, dyn_config
+        )
+        fixer_tend = compute_dry_mass_fixer(
+            ps=press_diag.ps,
+            tracers=grid3.tracers,
+            dp=press_diag.dp,
+            log_surface_pressure=final_state.log_surface_pressure,
+            lnps_spectral_tend=jnp.zeros_like(final_state.log_surface_pressure),
+            gauss_weights=gauss_weights,
+            pdryini=pdryini,
+            g=dyn_config.g,
+            dt=dt,
+            ntrunc=trans_config.truncation,
+        )
+        final_state = SpectralState(
+            vorticity=final_state.vorticity,
+            divergence=final_state.divergence,
+            temperature=final_state.temperature,
+            log_surface_pressure=final_state.log_surface_pressure + dt * fixer_tend,
+            tracers=final_state.tracers,
+        )
+
     dump_jax_intermediate(grid3, final_state, jax_debug_step, 3)
     return final_state

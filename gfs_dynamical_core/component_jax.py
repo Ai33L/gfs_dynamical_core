@@ -60,14 +60,16 @@ class GFSDynamicsJAX(Stepper):
 
     diagnostic_properties = {}
 
-    def __init__(self, **kwargs):
+    def __init__(self, adiabatic=False, **kwargs):
         super().__init__(**kwargs)
+        self.adiabatic = adiabatic
         self.dyn_config = None
         self.trans_config = None
         self.stepper_config = None
         self._phis_grads = None
         self._latitudes = None
-        # Dry-mass fixer state (computed once from the initial state)
+        # Dry-mass fixer state (computed once from the initial state).
+        # Not used when adiabatic=True (matches Fortran run.f90 line 330).
         self._gauss_weights = None
         self._pdryini = None
 
@@ -198,35 +200,32 @@ class GFSDynamicsJAX(Stepper):
         if self._latitudes is None:
             self._latitudes = get_gaussian_latitudes(L)
 
-        # Gaussian quadrature weights (normalised, sum to 1) — needed by the
-        # dry-mass fixer.  Derived from the same leggauss nodes used by s2fft
-        # GL sampling so that the area integral is exact.
-        if self._gauss_weights is None:
-            _, raw_weights = np.polynomial.legendre.leggauss(L)
-            # leggauss returns weights summing to 2; normalise to sum to 1.
-            self._gauss_weights = jnp.array(raw_weights / 2.0)
+        # Gaussian quadrature weights and initial dry surface pressure — only
+        # needed by the dry-mass fixer. Skip for adiabatic runs (matches
+        # Fortran run.f90 line 330: `if (.not. adiabatic) then`).
+        if not self.adiabatic:
+            if self._gauss_weights is None:
+                _, raw_weights = np.polynomial.legendre.leggauss(L)
+                # leggauss returns weights summing to 2; normalise to sum to 1.
+                self._gauss_weights = jnp.array(raw_weights / 2.0)
 
-        # Initial global-mean DRY surface pressure (Pa) — computed once from
-        # the very first call's surface pressure and humidity fields.
-        # pdryini = pmean - g * pwat_global
-        #   where pwat = (1/g) * sum_k(q_k * dp_k) per column.
-        if self._pdryini is None:
-            from .jax.dynamics import compute_pressure_diagnostics
+            if self._pdryini is None:
+                from .jax.dynamics import compute_pressure_diagnostics
 
-            lnps_grid = jnp.log(ps)
-            press_diag_init = compute_pressure_diagnostics(lnps_grid, self.dyn_config)
-            q_init = jnp.array(q)  # (n_lev, n_lat, n_lon)
-            g = self.dyn_config.g
-            pwat_init = (
-                jnp.sum(q_init * press_diag_init.dp, axis=0) / g
-            )  # (n_lat, n_lon)
-            w = self._gauss_weights[:, None]  # (n_lat, 1)
-            pmean_init = float(jnp.sum(w * ps) / n_lon)
-            pwat_global_init = float(jnp.sum(w * pwat_init) / n_lon)
-            self._pdryini = pmean_init - g * pwat_global_init
+                lnps_grid = jnp.log(ps)
+                press_diag_init = compute_pressure_diagnostics(lnps_grid, self.dyn_config)
+                q_init = jnp.array(q)  # (n_lev, n_lat, n_lon)
+                g = self.dyn_config.g
+                pwat_init = (
+                    jnp.sum(q_init * press_diag_init.dp, axis=0) / g
+                )  # (n_lat, n_lon)
+                w = self._gauss_weights[:, None]  # (n_lat, 1)
+                pmean_init = float(jnp.sum(w * ps) / n_lon)
+                pwat_global_init = float(jnp.sum(w * pwat_init) / n_lon)
+                self._pdryini = pmean_init - g * pwat_global_init
 
         # Advance one timestep (dry-mass fixer activated via gauss_weights +
-        # pdryini, matching Fortran run.f90 lines 349-356).
+        # pdryini when adiabatic=False, matching Fortran run.f90 lines 349-356).
         spec_final = self._jit_advance(
             spec_orig,
             self._phis_grads,

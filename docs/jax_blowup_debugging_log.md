@@ -379,18 +379,346 @@ advances the model.
 
 ---
 
+## Suspects Resolved by Line-by-Line Verification
+
+### Suspect 1 (PGF): `compute_pressure_gradient_force` — VERIFIED CORRECT ✅
+
+**Status**: After the fix in `b019f40`, all terms in `compute_pressure_gradient_force`
+match the Fortran `getpresgrad` (`dyn_run.f90` lines 487–563) exactly:
+- `cofb_pressure` (interface pressure ratios)
+- `cofa` (layer-mean geopotential coefficient)
+- `px2_factor` (geopotential integral, surface→TOA cumulative sum)
+- `px3u` / `px3v` (temperature-gradient correction, surface→TOA cumulative sum)
+- Final assembly: `pgf_x = px2u * dlnpdx + px3u`, `pgf_y = px2v * dlnpdy + px3v`
+
+**Conclusion**: PGF is no longer a suspect. The short-term trajectory matching
+Fortran (~999.47–1000.53 hPa over 10 steps) confirms this.
+
+---
+
+### Suspect 2 (Vertical velocities): `compute_vertical_velocities` — VERIFIED CORRECT ✅
+
+**Status**: All terms in `compute_vertical_velocities` match the Fortran `getomega`
+(`dyn_run.f90` lines 419–485) exactly:
+- `cg` (sigma-coordinate ratio `dbk / (dpk * 2)`)
+- `db` / `cb` cumulative sums (column-integrated mass flux partitioning)
+- `d_log_ps_d_t` (surface pressure tendency from divergence)
+- `etadot` (vertical mass flux at interfaces, BTU→TTB mapping correct)
+- `workb` / `workc` (omega intermediate terms)
+- `omega` (pressure vertical velocity)
+
+The BTU↔TTB index mapping was verified throughout: `etadot` is computed bottom-to-top
+but used as top-to-bottom input to `compute_vertical_advection`, which is consistent
+with the Fortran convention where `etadot` is top-to-bottom (`getvadv` comment:
+"etadot top to bottom").
+
+**Conclusion**: Vertical velocities are correct. Not a source of the blow-up.
+
+---
+
+### Suspect 3 (Semi-implicit matrices): `init_semi_implicit_matrices` — VERIFIED CORRECT ✅
+
+**Status**: All matrices in `init_semi_implicit_matrices` match the Fortran
+`semimp_data.f90` exactly:
+- Reference profile: `pkref` / `dpkref` / `alfaref` (hydrostatic layer means)
+- `yecm` / `tecm` operators (linearised divergence–temperature coupling)
+- BTU↔TTB flip of `yecm` before matrix algebra
+- `ym` = `I + coeff² * dt² * yecm @ tecm` (implicit operator)
+- `d_hyb_m[l]` = `ym⁻¹` per zonal wavenumber (inversion for implicit solve)
+- `amhyb` / `bmhyb` (back-substitution matrices)
+- `tor_hyb` / `svhyb` (linearised tendency operators)
+- Butcher tableau coefficients (`aa22`, `aa33`, `bb4`) match exactly
+
+**Conclusion**: Semi-implicit matrices are correct. Not a source of the blow-up.
+
+---
+
+## Root Cause Found: Dry Mass Fixer Misapplication — NEW BUG 🐛
+
+### Summary
+
+The dry mass fixer is being applied **incorrectly in two ways**, causing
+the long-term instability that persists after the PGF fix.
+
+### Problem 1: Fixer is active for the adiabatic DCMIP test case (it shouldn't be)
+
+In the Fortran (`run.f90` line 330):
+```fortran
+if (.not. adiabatic) then
+    ! ... all physics + dry mass fixer code ...
+    if (massfix) then
+        call dry_mass_fixer(psg,pwat,dlnpsspecdt1,dt)   ! line 358
+    endif
+    lnpsspec = lnpsspec + dt*dlnpsspecdt1               ! line 360
+endif
+```
+
+The fixer is **inside the `if (.not. adiabatic)` block** — it is never applied
+for adiabatic (dry dynamics-only) runs like the DCMIP baroclinic wave test case.
+
+In the JAX code, `component_jax.py` **always** initializes `_gauss_weights` (line 204)
+and `_pdryini` (line 213), regardless of whether the run is adiabatic. These are
+unconditionally passed to `advance()`, which builds `_dmf_kwargs` (stepper.py line 442)
+and applies the fixer at every timestep.
+
+### Problem 2: Fixer is applied inside the IMEX RK scheme (should be after)
+
+In the Fortran, the fixer runs **after** the complete IMEX RK3 integration:
+- Lines 349–353: RK scheme updates vrt, div, virtemp, tracer spectral fields
+- Lines 357–360: Dry mass fixer modifies `dlnpsspecdt1`, then `lnpsspec += dt * dlnpsspecdt1`
+
+This is a **post-RK correction** — it doesn't interfere with the implicit gravity
+wave solver.
+
+In the JAX code, the fixer is applied **at Stage 3 of the RK scheme**
+(`stepper.py` line 616–617):
+```python
+# --- Stage 3 ---
+tends2 = get_spectral_tendencies(state2, ..., **_dmf_kwargs)
+```
+
+Inside `get_spectral_tendencies` (`dynamics.py` lines 463–484), when the fixer
+arguments are present, it **replaces** the physical `lnps` spectral tendency:
+```python
+if pdryini is not None and gauss_weights is not None and dt is not None:
+    corrected_lnps_tend = compute_dry_mass_fixer(...)
+    spec_tends = SpectralTendencies(
+        ...,
+        d_log_surface_pressure_d_t=corrected_lnps_tend,  # REPLACES physical tendency
+        ...
+    )
+```
+
+For the dry DCMIP test case (q ≈ 0), `compute_dry_mass_fixer` computes:
+- `pcorr = (pdryini + g * pwat_global) / pmean ≈ pdryini / pmean ≈ 1.0`
+- `lnps_target_grid = log(ps * pcorr) ≈ log(ps)`
+- The returned tendency = `(lnps_target_spec - lnps_current) / dt` ≈ 0 for all
+  non-global-mean spectral modes
+
+Since Stage 3 carries weight `b3 = 2/3` in the RK scheme, this effectively zeroes
+out **two-thirds** of the surface pressure tendency at every timestep, preventing
+proper gravity wave propagation through the semi-implicit solver.
+
+### Why the short-term trajectory looks OK
+
+The fixer preserves the global mean of surface pressure correctly. The baroclinic
+wave perturbation grows slowly from a small initial anomaly, so the first ~10 steps
+appear stable. But the systematic suppression of non-zonal lnps tendencies at Stage 3
+progressively inhibits the baroclinic development, and the resulting energy imbalance
+eventually manifests as numerical instability.
+
+### Evidence Chain
+
+| File | Line(s) | Evidence |
+|------|---------|----------|
+| `component_jax.py` | 204–226 | `_gauss_weights` and `_pdryini` always initialized (no adiabatic check) |
+| `stepper.py` | 442–446 | `_dmf_kwargs` always non-empty when weights/pdryini provided |
+| `stepper.py` | 616–617 | `get_spectral_tendencies(state2, ..., **_dmf_kwargs)` applies fixer at Stage 3 |
+| `dynamics.py` | 463–484 | Fixer **replaces** lnps tendency (not corrects it) |
+| `dynamics.py` | 398–422 | `compute_dry_mass_fixer` returns ≈ 0 for all non-mean modes in dry case |
+| `run.f90` | 330 | `if (.not. adiabatic) then` — Fortran skips fixer for adiabatic runs |
+| `run.f90` | 357–360 | Fortran applies fixer **after** IMEX RK, not inside it |
+
+### Proposed Fix
+
+**Immediate (fixes the blow-up):** Disable the dry mass fixer for adiabatic runs.
+Either add an `adiabatic` flag to `GFSDynamicsJAX` or simply don't pass
+`gauss_weights`/`pdryini` to `advance()`.
+
+**Structural (needed for future moist runs):** Move the fixer from inside the RK
+scheme (Stage 3) to a post-RK correction step, matching Fortran's `run.f90`
+lines 357–360. The fixer should modify the final `lnps` spectral state after the
+RK update is complete, not replace a stage tendency.
+
+### Secondary Issue (not the blow-up cause): Virtual Temperature
+
+The Fortran wrapper (`component.py` line 448) converts `T → Tv` (virtual temperature)
+before dynamics and `Tv → T` after:
+```python
+t_virt = state["air_temperature"] * (1 + self._fvirt * state["tracers"][0])
+```
+
+The JAX `component_jax.py` passes regular `T` directly. For the dry DCMIP test
+(q ≈ 0, so Tv ≈ T) this is harmless, but it will need fixing for moist simulations.
+
+---
+
 ## Current State of the Codebase
 
 | Component | Status |
 |-----------|--------|
-| `jax/dynamics.py` | Vertical advection sign fixed; Coriolis confirmed correct (matches Fortran exactly); `compute_pressure_gradient_force` and `compute_vertical_velocities` **not yet numerically validated vs Fortran** |
+| `jax/dynamics.py` | Vertical advection sign fixed; Coriolis confirmed correct; PGF confirmed correct; vertical velocities confirmed correct; `compute_dry_mass_fixer` **identified as misapplied** |
 | `jax/transforms.py` | Forward vector transform fixed (dual-spin); inverse transform correct as-is |
-| `jax/stepper.py` | JIT tracer guard added; IMEX RK structure matches Fortran by inspection; semi-implicit matrices **not yet validated at element level** |
-| `component_jax.py` | Spectral state caching added; no more repeated round-trips |
+| `jax/stepper.py` | JIT tracer guard added; IMEX RK structure matches Fortran; semi-implicit matrices confirmed correct; **dry mass fixer applied at wrong stage** |
+| `component_jax.py` | Spectral state caching added; **dry mass fixer unconditionally enabled (should be off for adiabatic)** |
 | `tests/test_jax_dynamics.py` | Updated for corrected vertical advection signs |
 | `tests/test_jax_transforms.py` | Passes for conjugate-symmetric inputs (correct) |
 
 ---
 
-*Last updated: Coriolis term verified correct and ruled out as blow-up cause (H5). Active suspects: `compute_pressure_gradient_force` (HIGH) and `compute_vertical_velocities` (MEDIUM).*
+*Last updated: All three original suspects (PGF, vertical velocities, semi-implicit matrices) verified correct by line-by-line comparison with Fortran. Root cause identified: dry mass fixer is (a) active for adiabatic runs when it shouldn't be, and (b) applied inside the IMEX RK scheme instead of after it.*
 *Branch: `develop`.*
+
+---
+
+## Changelog
+
+### 2026-03-22 — JW2006 Diagnostics & Refined Root Cause
+
+#### New Diagnostics
+
+Ran `examples/jw06_diagnostics.py`, implementing JW2006 Eqs 14–16 (l2 zonal
+asymmetry, zonal-mean drift, surface pressure difference) for both JAX and
+Fortran over 30 simulated days. Config: L=64, ntrunc=40, dt=600s (JAX),
+dt=300s (Fortran), DCMIP test 4.1 (dry baroclinic wave, `adiabatic=False`
+in both codes).
+
+**Key observations from the plots:**
+
+- `jw06_steady_errors.png`: JAX l2 zonal asymmetry grows **exponentially**
+  from ~10^-11 to ~10^1 in 8 days (e-folding time ~7 hours). Fortran grows
+  from ~10^-11 to ~10^-3 in 30 days (expected slow growth from the
+  perturbation).
+- `jw06_ps_min.png`: JAX PS minimum crashes from ~1000 hPa to near 0 between
+  days 8–10. Fortran PS minimum evolves smoothly.
+- `jw06_wave_snapshots_JAX.png`: Realistic baroclinic wave development at
+  days 4, 6, 8; completely destroyed by day 9.
+- `jw06_wave_snapshots_Fortran.png`: Stable realistic development through
+  day 10.
+- `jw06_vorticity.png`: Day 7 JAX vorticity matches Fortran well; day 9
+  JAX vorticity field is blank/noise.
+
+The exponential growth with constant e-folding time is the signature of an
+**undamped linear instability**, not a nonlinear blow-up. This pointed the
+investigation toward modes that receive no diffusion.
+
+#### Refined Root Cause: Missing Triangular Truncation in Dry Mass Fixer
+
+The previously identified dry mass fixer issues (Problems 1 and 2 above —
+wrong adiabatic gating and wrong RK placement) are real but secondary. The
+**primary mechanism** driving the day 7–8 blow-up is:
+
+**File**: `gfs_dynamical_core/jax/dynamics.py` — `compute_dry_mass_fixer()`
+(line ~421)
+
+**Bug**: The fixer calls `s2fft.forward_jax(log(ps * pcorr), L, sampling="gl")`
+which produces spectral coefficients for ALL modes l=0..L-1=63. The Fortran
+equivalent `grdtospec()` uses packed triangular storage (`ndimspec` elements)
+that inherently limits output to l=0..ntrunc=40. Modes l=41..63 simply cannot
+exist in Fortran.
+
+In JAX, these extra modes (l=41..63) in `lnps_target_spec` are injected into
+the spectral state every timestep because the fixer tendency **replaces**
+`lnps`:
+
+```
+new_lnps = old_lnps + dt * fixer_tend = lnps_target_spec
+```
+
+**Why this causes exponential blow-up:**
+
+1. Each timestep, the `exp/log` round-trip in the fixer
+   (`log(exp(lnps) * pcorr)`) introduces ~10^-15 noise per step at modes
+   l=41..63.
+2. These modes get **ZERO diffusion**: `disspec = 0` for l > ntrunc = 40
+   (by design — `stepper.py` line 357–358 sets `disspec_2d = 0` outside the
+   triangular truncation mask).
+3. No truncation is applied to the spectral **state** — only to spectral
+   **tendencies** (inside `grid_to_spectral_tendencies`, which calls
+   `enforce_triangular_truncation`). The fixer bypasses this path.
+4. The l > 40 lnps modes create small-scale grid features in surface pressure.
+5. Grid-space dynamics respond, transferring energy to l <= 40 through
+   nonlinear coupling (aliasing).
+6. Exponential growth with ~7-hour e-folding time, catastrophic by day 7–8.
+
+**Evidence chain:**
+
+| Fact | Location |
+|------|----------|
+| `s2fft.forward_jax` produces L×(2L-1) = 64×127 spectral array | s2fft docs |
+| Fortran `grdtospec` produces `ndimspec = (ntrunc+1)*(ntrunc+2)/2 = 861` packed coefficients | `shtns.f90` |
+| `disspec = 0` for l > ntrunc | `stepper.py:357-358` |
+| `enforce_triangular_truncation` applied to tendencies but NOT to state | `transforms.py:376-380` |
+| Fixer replaces lnps tendency (not additive correction) | `dynamics.py:463-484` |
+| Exponential growth with constant e-folding = undamped linear mode | `jw06_steady_errors.png` |
+
+**Proposed fix**: Apply `enforce_triangular_truncation` to `lnps_target_spec`
+in `compute_dry_mass_fixer` before computing the tendency:
+
+```python
+lnps_target_spec = s2fft.forward_jax(lnps_target_grid, L, sampling="gl")
+lnps_target_spec = enforce_triangular_truncation(lnps_target_spec, ntrunc)
+return (lnps_target_spec - log_surface_pressure) / dt
+```
+
+This matches the Fortran behavior where only l <= ntrunc modes can exist.
+
+#### Additional Bugs Found (not root cause of blow-up, but incorrect)
+
+**Bug A: Tracer vertical advection sign error**
+
+**File**: `dynamics.py` — `compute_vertical_advection_tracers()` (lines 244–246)
+
+The three flux terms are sign-flipped relative to Fortran `getvadv_tracers`.
+Fortran computes `F_bottom - F_top`; JAX computes `F_top - F_bottom`.
+
+Current (wrong):
+```python
+vadv = (1.0 / dp) * (
+    (datag_half_full[1:] * etadot[1:] - datag_half_full[:-1] * etadot[:-1])
+    + data * (etadot[:-1] - etadot[1:])
+)
+```
+
+Fix — swap `[:-1]` and `[1:]`:
+```python
+vadv = (1.0 / dp) * (
+    (datag_half_full[:-1] * etadot[:-1] - datag_half_full[1:] * etadot[1:])
+    + data * (etadot[1:] - etadot[:-1])
+)
+```
+
+Impact: Harmless for the dry DCMIP test (q ~ 0), but will matter for moist runs.
+
+**Bug B: Boundary `datag_d` sign mismatch in tracer limiter**
+
+**File**: `dynamics.py` — `compute_vertical_advection_tracers()` (lines 200–213)
+
+The boundary formulas for `datag_d_bot` and `datag_d_top` use Fortran's sign
+convention (below-minus-above), while the interior `datag_d = data[1:] - data[:-1]`
+uses above-minus-below. The phi ratio at boundaries becomes negative, causing
+the limiter to clamp to 0 (first-order upwind at boundaries only).
+
+Fix: Negate boundary formulas to match interior convention.
+
+Impact: Minor — only affects first and last levels of tracer advection limiter.
+
+**Bug C: Minor TOA `workb` discrepancy in `getomega`**
+
+Fortran k=1 `workb` has an extra factor of `dbk(1)` compared to JAX.
+Impact: Negligible since `dbk` at TOA ~ 0.
+
+#### Verified Correct (no discrepancies found)
+
+These components were verified by line-by-line comparison with Fortran during
+this session and confirmed correct:
+
+- `compute_pressure_diagnostics` vs `calc_pressdata`
+- `compute_pressure_gradient_force` vs `getpresgrad`
+- `compute_vertical_advection` (non-tracer) vs `getvadv`
+- `compute_vertical_velocities` vs `getomega` (minor TOA note above)
+- `compute_energy_conversion` vs Fortran energy conversion term
+- `assemble_grid_tendencies` vs `getdyntend` (Coriolis, flux assembly)
+- IMEX RK3 Butcher tableau coefficients
+- `init_semi_implicit_matrices` vs `init_semimpdata`
+- `init_diffusion_operators` vs `setdampspec`
+- Spectral transform conventions (s2fft spin-weighted vs SHTNS sphtor)
+- KE Laplacian in divergence tendency
+
+#### Next Steps
+
+1. **Fix the truncation bug** in `compute_dry_mass_fixer` (apply
+   `enforce_triangular_truncation` to the forward-transformed lnps).
+2. **Fix tracer vertical advection sign** (Bug A above).
+3. **Fix boundary `datag_d` signs** (Bug B above).
+4. Re-run `jw06_diagnostics.py` to confirm the blow-up is eliminated.

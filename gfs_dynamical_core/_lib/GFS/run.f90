@@ -1,5 +1,5 @@
 module run_mod
-! time step loop for model run.
+! time step test loop for model run.
 ! Public subroutines:
 ! run: main time step loop (advances model state, writes out
 ! data at specified intervals).
@@ -32,7 +32,7 @@ private
 real(c_double) :: t
 integer :: debug_step_count = 0
 bind(c) :: t
-public :: take_one_step, t, dump_intermediate
+public :: take_one_step, t, dump_intermediate, dump_imex_stage1
 
 contains
 
@@ -115,11 +115,13 @@ subroutine advance(t)
       dvrtspecdt1,ddivspecdt1,dvirtempspecdt1,&
       dvrtspecdt2,ddivspecdt2,dvirtempspecdt2,&
       psiforcing,tvforcing,ddivdtlin_orig, dtvdtlin_orig,&
-      ddivdtlin1, ddivdtlin2, dtvdtlin1, dtvdtlin2
+      ddivdtlin1, ddivdtlin2, dtvdtlin1, dtvdtlin2, &
+      ddivspecdt_orig_total, dvirtempspecdt_orig_total
   complex(r_kind), dimension(ndimspec,nlevs,ntrac) :: &
       dtracerspecdt_orig,&
       tracerspec_orig,dtracerspecdt1,dtracerspecdt2
   complex(r_kind) :: rhs(nlevs)
+  complex(r_kind), dimension(ndimspec) :: dlnpsspecdt_orig_total
   integer nt, k, n
   !logical :: profile = .false. ! print out timing stats
   integer(8) count, count_rate, count_max
@@ -147,6 +149,11 @@ subroutine advance(t)
   call system_clock(count, count_rate, count_max)
   t2 = count*1.d0/count_rate
 
+! Save total tendencies BEFORE explicit/implicit branch (getdyntend already computed them)
+  ddivspecdt_orig_total = ddivspecdt_orig
+  dvirtempspecdt_orig_total = dvirtempspecdt_orig
+  dlnpsspecdt_orig_total = dlnpsspecdt_orig
+
 !$omp workshare
   vrtspec=vrtspec_orig+a21*dt*dvrtspecdt_orig
   tracerspec=tracerspec_orig+a21*dt*dtracerspecdt_orig
@@ -163,7 +170,7 @@ subroutine advance(t)
 !$omp parallel do private(n,rhs)
   do n=1,ndimspec
 ! first remove linear terms from computed tendencies.
-      ddivdtlin_orig(n,:) = -lap(n)*& 
+      ddivdtlin_orig(n,:) = -lap(n)*&
       (matmul(amhyb,virtempspec_orig(n,:)) + tor_hyb(:)*lnpsspec_orig(n))
       ddivspecdt_orig(n,:) = ddivspecdt_orig(n,:) - ddivdtlin_orig(n,:)
       dtvdtlin_orig(n,:) = -matmul(bmhyb,divspec_orig(n,:))
@@ -185,8 +192,13 @@ subroutine advance(t)
       virtempspec(n,:) = virtempspec(n,:) - aa22*dt*matmul(bmhyb,divspec(n,:))
       lnpsspec(n) = lnpsspec(n) - aa22*dt*sum(svhyb(:)*divspec(n,:))
   enddo
-!$omp end parallel do 
+!$omp end parallel do
   endif
+
+  ! Dump IMEX stage 1 intermediates
+  call dump_imex_stage1(ddivspecdt_orig_total, dvirtempspecdt_orig_total, &
+       dlnpsspecdt_orig_total, ddivdtlin_orig, dtvdtlin_orig, dlnpsdtlin_orig, &
+       ddivspecdt_orig, dvirtempspecdt_orig, dlnpsspecdt_orig)
 
   call dump_intermediate(1)
   ! stage 2
@@ -322,6 +334,26 @@ subroutine advance(t)
   enddo
   !$omp end parallel do
 
+  ! --- DEBUG: dump spectral state + tendencies every step ---
+  block
+    integer :: iu_dump
+    character(len=200) :: dump_fname
+    write(dump_fname, '(A,I5.5,A)') 'debug_data/fortran_step_', debug_step_count, '.bin'
+    open(newunit=iu_dump, file=trim(dump_fname), form='unformatted', access='stream', status='replace')
+    write(iu_dump) ndimspec, nlevs, debug_step_count
+    ! Spectral state after diffusion (before physics)
+    write(iu_dump) vrtspec          ! (ndimspec, nlevs)
+    write(iu_dump) divspec          ! (ndimspec, nlevs)
+    write(iu_dump) virtempspec      ! (ndimspec, nlevs)
+    write(iu_dump) lnpsspec         ! (ndimspec)
+    ! Stage-1 total tendencies (from getdyntend, before IMEX splitting)
+    write(iu_dump) dvrtspecdt_orig       ! (ndimspec, nlevs) - stage 1 vrt tendency
+    write(iu_dump) ddivspecdt_orig_total ! (ndimspec, nlevs) - stage 1 div tendency (total)
+    write(iu_dump) dvirtempspecdt_orig_total ! (ndimspec, nlevs) - stage 1 T tendency (total)
+    write(iu_dump) dlnpsspecdt_orig_total    ! (ndimspec) - stage 1 lnps tendency (total)
+    close(iu_dump)
+  end block
+
   call system_clock(count, count_rate, count_max)
   t4 = count*1.d0/count_rate
   !if (profile) print *,'time in dynamics update=',t4-t0
@@ -421,6 +453,54 @@ subroutine dump_intermediate(stage)
     
     close(unit_num)
 end subroutine dump_intermediate
+
+
+subroutine dump_imex_stage1(ddivdt_total, dtempdt_total, dlnpsdt_total, &
+     ddivdt_lin, dtempdt_lin, dlnpsdt_lin, &
+     ddivdt_nl, dtempdt_nl, dlnpsdt_nl)
+    use params, only: nlevs, ndimspec
+    use spectral_data, only: disspec, diff_prof, dmp_prof
+    use semimp_data, only: amhyb, bmhyb, tor_hyb, svhyb
+    use shtns, only: lap, degree
+    complex(r_kind), dimension(ndimspec, nlevs), intent(in) :: &
+         ddivdt_total, dtempdt_total, ddivdt_lin, dtempdt_lin, ddivdt_nl, dtempdt_nl
+    complex(r_kind), dimension(ndimspec), intent(in) :: &
+         dlnpsdt_total, dlnpsdt_lin, dlnpsdt_nl
+    character(len=100) :: filename
+    integer :: unit_num
+
+    if (debug_step_count > 5) return
+
+    write(filename, '(A,I0,A)') 'debug_data/fortran_imex_step_', debug_step_count, '.bin'
+    unit_num = 200
+
+    open(unit=unit_num, file=trim(filename), form='unformatted', access='stream', status='replace')
+    ! Total tendencies (before nonlinear/linear split)
+    write(unit_num) ddivdt_total
+    write(unit_num) dtempdt_total
+    write(unit_num) dlnpsdt_total
+    ! Linear tendencies
+    write(unit_num) ddivdt_lin
+    write(unit_num) dtempdt_lin
+    write(unit_num) dlnpsdt_lin
+    ! Nonlinear tendencies (total - linear)
+    write(unit_num) ddivdt_nl
+    write(unit_num) dtempdt_nl
+    write(unit_num) dlnpsdt_nl
+    ! Operators for verification
+    write(unit_num) disspec
+    write(unit_num) diff_prof
+    write(unit_num) dmp_prof
+    ! Semi-implicit matrices
+    write(unit_num) amhyb
+    write(unit_num) bmhyb
+    write(unit_num) tor_hyb
+    write(unit_num) svhyb
+    ! Laplacian eigenvalues and degree mapping
+    write(unit_num) lap
+    write(unit_num) degree
+    close(unit_num)
+end subroutine dump_imex_stage1
 
 
 end module run_mod

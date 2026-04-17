@@ -6,6 +6,9 @@ os.environ["JAX_ENABLE_X64"] = "True"
 from datetime import timedelta
 
 import climt
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from sympl import PlotFunctionMonitor, set_constant
@@ -86,26 +89,23 @@ def plot_baroclinic_wave(fig, state):
 
 
 # 5. Simulation Loop
-timestep = timedelta(minutes=10)
+timestep = timedelta(minutes=5)
 print(f"Starting simulation with dt = {timestep}")
 
 # Use PlotFunctionMonitor to save frames (or just save final)
 # monitor = PlotFunctionMonitor(plot_baroclinic_wave)
 
 try:
-    for i in range(144 * 20):  # Run for 24 hours (144 steps at 10 min)
-        # Check for stability
-        ps_max = np.max(my_state["surface_air_pressure"].values)
-        if ps_max > 2e5 or np.isnan(ps_max):
-            print(f"Simulation unstable at step {i}! PS max: {ps_max}")
-            break
-
+    for i in range(144 * 20):  # Run for 20 days (144 steps/day at 10 min)
         diag, output = dycore(my_state, timestep=timestep)
         my_state.update(output)
         my_state["time"] += timestep
 
+        ps_vals = my_state["surface_air_pressure"].values
+        ps_min = np.min(ps_vals)
+        ps_max = np.max(ps_vals)
+
         if (i + 1) % 6 == 0:  # Every hour (6 steps of 10 mins)
-            ps_min = np.min(my_state["surface_air_pressure"].values)
             hour = (i + 1) // 6
             print(
                 f"Hour {hour:2d}, Step {i + 1:3d}, Time: {my_state['time']}, PS range: {ps_min / 100.0:.1f} - {ps_max / 100.0:.1f} hPa"
@@ -115,9 +115,18 @@ try:
             plt.savefig(f"baroclinic_wave_jax_hour_{hour:02d}.png")
             plt.close(fig)
 
+        if ps_max > 2e5 or np.isnan(ps_max):
+            print(
+                f"Simulation unstable at step {i + 1}! PS range: {ps_min / 100.0:.1f} - {ps_max / 100.0:.1f} hPa"
+            )
+            break
+
     print("Simulation complete.")
 
 except Exception as e:
+    import traceback
+
+    traceback.print_exc()
     print(f"Error during simulation: {e}")
 
 # 6. Final Visualization
