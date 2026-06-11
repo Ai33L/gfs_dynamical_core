@@ -416,7 +416,7 @@ def compute_dry_mass_fixer(
     ntrunc: int = None,
 ) -> jnp.ndarray:
     """Adjusts spectral lnps tendency to conserve dry surface pressure."""
-    import s2fft
+    from .transforms import s2_forward as _s2_forward
 
     q = tracers[0]
     pwat = jnp.sum(q * dp, axis=0) / g
@@ -427,7 +427,7 @@ def compute_dry_mass_fixer(
     pcorr = (pdryini + g * pwat_global) / pmean
     lnps_target_grid = jnp.log(ps * pcorr)
     L = log_surface_pressure.shape[0]
-    lnps_target_spec = s2fft.forward_jax(lnps_target_grid, L, sampling="gl")
+    lnps_target_spec = _s2_forward(lnps_target_grid, L, "gl")
     # Enforce triangular truncation to match Fortran's packed spectral storage.
     # Without this, modes l > ntrunc receive no diffusion and accumulate noise.
     if ntrunc is not None:

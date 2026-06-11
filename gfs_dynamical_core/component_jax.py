@@ -14,6 +14,8 @@ from .jax.stepper import (
 )
 from .jax.transforms import (
     TransformConfig,
+    s2_forward,
+    s2_inverse,
     get_gaussian_latitudes,
     grid_to_spectral,
     spectral_to_grid,
@@ -73,11 +75,73 @@ class GFSDynamicsJAX(Stepper):
         self._gauss_weights = None
         self._pdryini = None
 
-        self._jit_advance = advance
+        # JIT-compile the stepper. All config dataclasses are flax structs
+        # (static fields marked pytree_node=False), so they trace cleanly.
+        # First call compiles (~30 s); subsequent steps run fully fused.
+        self._jit_advance = jax.jit(advance)
         # Cached spectral state: only do grid_to_spectral once (for the
         # initial condition).  After that, advance directly in spectral
         # space to avoid repeated grid→spectral→grid round-trip errors.
         self._spec_state = None
+        # Optional physics tendencies (numpy/jnp grid arrays), applied
+        # time-split after the dynamics step — mirrors Fortran run.f90's
+        # getphytend adjustment and the wrapper's assign_tendencies path.
+        self._phys_tendencies = None
+
+    def set_physics_tendencies(self, u_tend=None, v_tend=None, t_tend=None):
+        """Set grid-space physics tendencies (e.g. Held-Suarez forcing) to be
+        applied as a time-split adjustment after the next dynamics step.
+
+        Arrays must be (n_lev, n_lat, n_lon) bottom-to-top, SI units
+        (m s^-2 for winds, K s^-1 for temperature). Call with no arguments
+        to clear. Mirrors Fortran: tendencies are computed from the state
+        at the START of the step and applied AFTER dynamics as
+        ``x += dt * tendency`` (run.f90 physics block).
+        """
+        if u_tend is None and v_tend is None and t_tend is None:
+            self._phys_tendencies = None
+        else:
+            self._phys_tendencies = (
+                jnp.asarray(u_tend),
+                jnp.asarray(v_tend),
+                jnp.asarray(t_tend),
+            )
+
+    def _apply_physics_tendencies(self, spec_state, dt):
+        """Convert grid physics tendencies to spectral and apply time-split."""
+        from .jax.states import SpectralState
+        from .jax.transforms import enforce_triangular_truncation
+
+        u_t, v_t, t_t = self._phys_tendencies
+        L = self.trans_config.L
+        sampling = self.trans_config.sampling
+        radius = self.dyn_config.radius
+        T = self.trans_config.truncation
+
+        l_arr = jnp.arange(L)
+        l_factor = jnp.sqrt(l_arr * (l_arr + 1))
+
+        def uv_to_vrtdiv(u, v):
+            F1 = s2_forward(-v + 1j * u, L, sampling, spin=1)
+            Fm1 = s2_forward(v + 1j * u, L, sampling, spin=-1)
+            rp = l_factor[:, None] * F1 / radius
+            rm = l_factor[:, None] * Fm1 / radius
+            return (rp - rm) / 2j, (rp + rm) / 2  # vort, div
+
+        vort_t, div_t = jax.vmap(uv_to_vrtdiv)(u_t, v_t)
+        temp_t = jax.vmap(lambda f: s2_forward(f, L, sampling))(t_t)
+
+        vort_t = enforce_triangular_truncation(vort_t, L, T)
+        div_t = enforce_triangular_truncation(div_t, L, T)
+        temp_t = enforce_triangular_truncation(temp_t, L, T)
+
+        return SpectralState(
+            vorticity=spec_state.vorticity + dt * vort_t,
+            divergence=spec_state.divergence + dt * div_t,
+            temperature=spec_state.temperature + dt * temp_t,
+            log_surface_pressure=spec_state.log_surface_pressure,
+            tracers=spec_state.tracers,
+        )
 
     def array_call(self, state, timestep):
         u = jnp.array(state["eastward_wind"])
@@ -113,7 +177,7 @@ class GFSDynamicsJAX(Stepper):
                 / get_constant(
                     "heat_capacity_of_dry_air_at_constant_pressure", "J kg^-1 K^-1"
                 ),
-                toa_pressure=0.0,
+                toa_pressure=get_constant("top_of_model_pressure", "Pa"),
                 radius=get_constant("planetary_radius", "m"),
                 omega=get_constant("planetary_rotation_rate", "s^-1"),
                 g=get_constant("gravitational_acceleration", "m s^-2"),
@@ -133,6 +197,11 @@ class GFSDynamicsJAX(Stepper):
             self.trans_config = TransformConfig(
                 L=L, sampling="gl", radius=self.dyn_config.radius
             )
+            # Build precompute transform kernels eagerly — kernel
+            # construction is not jit-traceable.
+            from .jax.transforms import prebuild_kernels
+
+            prebuild_kernels(L, "gl")
 
         if self.stepper_config is None:
             # Build a temporary default config to read the canonical IMEX
@@ -187,11 +256,11 @@ class GFSDynamicsJAX(Stepper):
         if self._phis_grads is None:
             sampling = self.trans_config.sampling
             radius = self.dyn_config.radius
-            phis_lm = s2fft.forward_jax(phis, L, sampling=sampling)
+            phis_lm = s2_forward(phis, L, sampling)
             l_arr = jnp.arange(L)
             l_factor = jnp.sqrt(l_arr * (l_arr + 1))
             F1_phis_lm = -l_factor[:, None] * phis_lm
-            f_phis_spin1 = s2fft.inverse_jax(F1_phis_lm, L, spin=1, sampling=sampling)
+            f_phis_spin1 = s2_inverse(F1_phis_lm, L, sampling, spin=1)
             dphisdx = f_phis_spin1.imag / radius
             dphisdy = -f_phis_spin1.real / radius
             self._phis_grads = (dphisdx, dphisdy)
@@ -236,6 +305,11 @@ class GFSDynamicsJAX(Stepper):
             self._gauss_weights,
             self._pdryini,
         )
+
+        # Time-split physics adjustment (Held-Suarez etc.), matching the
+        # Fortran wrapper's assign_tendencies + run.f90 physics block.
+        if self._phys_tendencies is not None:
+            spec_final = self._apply_physics_tendencies(spec_final, dt)
 
         # Cache the spectral state for the next call so we never re-do
         # grid→spectral (which would accumulate truncation error).

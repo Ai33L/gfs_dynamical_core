@@ -3,8 +3,58 @@ import jax.numpy as jnp
 import numpy as np
 import s2fft
 from flax import struct
+from s2fft.precompute_transforms import spherical as _pre_spherical
+from s2fft.precompute_transforms.construct import (
+    spin_spherical_kernel_jax as _build_spin_kernel,
+)
 
 from .states import GridGradients, GridState, SpectralState, SpectralTendencies
+
+# ---------------------------------------------------------------------------
+# Precompute-kernel transform wrappers.
+#
+# s2fft's on-the-fly Wigner recursions dominate the dycore cost (~7 ms per
+# transform at L=64 on CPU). The precompute kernels are only ~4 MB each at
+# this resolution and reduce a transform to a dense contraction (~0.6 ms,
+# ~12x faster), matching the recursive results to ~1e-12. Kernels are cached
+# per (L, sampling, spin, direction); under jit they become baked-in
+# constants.
+# ---------------------------------------------------------------------------
+
+_KERNEL_CACHE: dict = {}
+
+
+def _kernel(L: int, sampling: str, spin: int, forward: bool):
+    key = (L, sampling, spin, forward)
+    if key not in _KERNEL_CACHE:
+        # Kernel construction is not jit-traceable (data-dependent nonzero):
+        # it must happen eagerly. prebuild_kernels() does this; the lazy path
+        # here covers direct (non-jit) use in tests and scripts.
+        _KERNEL_CACHE[key] = _build_spin_kernel(
+            L, spin=spin, sampling=sampling, forward=forward
+        )
+    return _KERNEL_CACHE[key]
+
+
+def prebuild_kernels(L: int, sampling: str = "gl"):
+    """Eagerly build every kernel the dycore uses, so that jit-compiled
+    code only ever reads the cache. Must be called before tracing."""
+    for spin, forward in [(0, True), (0, False), (1, True), (1, False), (-1, True)]:
+        _kernel(L, sampling, spin, forward)
+
+
+def s2_forward(f, L: int, sampling: str, spin: int = 0):
+    """Forward spherical-harmonic transform via precompute kernel."""
+    return _pre_spherical.forward_transform_jax(
+        f, _kernel(L, sampling, spin, True), L, sampling, False, spin, None
+    )
+
+
+def s2_inverse(flm, L: int, sampling: str, spin: int = 0):
+    """Inverse spherical-harmonic transform via precompute kernel."""
+    return _pre_spherical.inverse_transform_jax(
+        flm, _kernel(L, sampling, spin, False), L, sampling, False, spin, None
+    )
 
 
 def get_grid_dimensions(L: int, sampling: str) -> tuple[int, int]:
@@ -107,26 +157,26 @@ def spectral_to_grid(
 
     def transform_level(vort, div, temp, tracers):
         # 1. Scalar transforms
-        grid_t = s2fft.inverse_jax(temp, L, sampling=sampling)
-        grid_vort = s2fft.inverse_jax(vort, L, sampling=sampling)
-        grid_div = s2fft.inverse_jax(div, L, sampling=sampling)
+        grid_t = s2_inverse(temp, L, sampling)
+        grid_vort = s2_inverse(vort, L, sampling)
+        grid_div = s2_inverse(div, L, sampling)
 
         # 2. Vector transforms (vort, div -> u, v)
         # F1_lm = (D_lm + i zeta_lm) * radius / sqrt(l(l+1))
         F1_lm = inv_l_factor[:, None] * (div + 1j * vort) * radius
-        f_spin1 = s2fft.inverse_jax(F1_lm, L, spin=1, sampling=sampling)
+        f_spin1 = s2_inverse(F1_lm, L, sampling, spin=1)
         # u = Imag(f_spin1), v = -Real(f_spin1)
         grid_u = f_spin1.imag
         grid_v = -f_spin1.real
 
         # 3. Tracers (scalar inverse transforms)
         grid_tracers = jax.vmap(
-            lambda flm: s2fft.inverse_jax(flm, L, sampling=sampling)
+            lambda flm: s2_inverse(flm, L, sampling)
         )(tracers)
 
         # 4. Temperature Gradients
         F1_t_lm = -l_factor[:, None] * temp
-        f_t_spin1 = s2fft.inverse_jax(F1_t_lm, L, spin=1, sampling=sampling)
+        f_t_spin1 = s2_inverse(F1_t_lm, L, sampling, spin=1)
         grad_t_x = f_t_spin1.imag / radius
         grad_t_y = -f_t_spin1.real / radius
 
@@ -134,7 +184,7 @@ def spectral_to_grid(
         # tracers shape here: (n_tracers, L, 2*L-1)
         def _tracer_grad(tracer_flm):
             F1_lm_ = -l_factor[:, None] * tracer_flm
-            f_spin1_ = s2fft.inverse_jax(F1_lm_, L, spin=1, sampling=sampling)
+            f_spin1_ = s2_inverse(F1_lm_, L, sampling, spin=1)
             return f_spin1_.imag / radius, -f_spin1_.real / radius
 
         grad_tracers_x, grad_tracers_y = jax.vmap(_tracer_grad)(tracers)
@@ -176,11 +226,11 @@ def spectral_to_grid(
     grad_tracers_x = grad_tracers_x.transpose(1, 0, 2, 3)
     grad_tracers_y = grad_tracers_y.transpose(1, 0, 2, 3)
 
-    lnps = s2fft.inverse_jax(spec_state.log_surface_pressure, L, sampling=sampling)
+    lnps = s2_inverse(spec_state.log_surface_pressure, L, sampling)
 
     # Log surface pressure gradients
     F1_lnps_lm = -l_factor[:, None] * spec_state.log_surface_pressure
-    f_lnps_spin1 = s2fft.inverse_jax(F1_lnps_lm, L, spin=1, sampling=sampling)
+    f_lnps_spin1 = s2_inverse(F1_lnps_lm, L, sampling, spin=1)
     grad_lnps_x = f_lnps_spin1.imag / radius
     grad_lnps_y = -f_lnps_spin1.real / radius
 
@@ -208,19 +258,44 @@ def spectral_to_grid(
 
 def enforce_triangular_truncation(flm, L, T):
     """
-    Zero out spherical harmonics where l > T or |m| > T.
+    Zero out spherical harmonics where l > T or |m| > T, and enforce the
+    reality condition f_{l,-m} = (-1)^m conj(f_{l,+m}) (with Im f_{l,0} = 0).
+
+    The reality enforcement is essential for long-term stability: s2fft
+    stores the full (l, +-m) rectangle and treats fields as general
+    complex functions, so roundoff (mainly in the dual-spin +- forward
+    combinations) seeds a tiny violation of the reality condition. That
+    violation is exactly an imaginary-valued grid field, which evolves as
+    an undamped tangent-linear perturbation of the flow — it e-folds with
+    the jet's fastest instability (~5.5 h for the JW06 jet at T40) until
+    it couples back into the real part through nonlinear terms and blows
+    up the model around day 7-8. SHTNS/Fortran enforces the symmetry by
+    construction (it only stores m >= 0); this makes the JAX state do the
+    same. All real-coefficient linear ops (RK updates, implicit solve,
+    diffusion) preserve the symmetry exactly, so applying it at every
+    forward-transform output keeps the state symmetric for all time.
+
     flm shape: (..., L, 2L-1)
     """
     l_arr = jnp.arange(L)
     m_arr = jnp.arange(-L + 1, L)
     l_grid, m_grid = jnp.meshgrid(l_arr, m_arr, indexing="ij")
-    mask = (l_grid <= T) & (jnp.abs(m_grid) <= T)
+    mask = (l_grid <= T) & (jnp.abs(m_grid) <= T) & (jnp.abs(m_grid) <= l_grid)
 
     # Expand mask for prepended dimensions
     for _ in range(flm.ndim - 2):
         mask = jnp.expand_dims(mask, axis=0)
 
-    return jnp.where(mask, flm, 0.0)
+    flm = jnp.where(mask, flm, 0.0)
+
+    # Reality condition: rebuild negative-m modes from positive-m modes
+    # (matching Fortran/SHTNS, which only stores m >= 0), zero Im at m=0.
+    m_vals = jnp.arange(-L + 1, L)  # m along the last axis
+    sign = jnp.where(m_vals % 2 == 0, 1.0, -1.0)  # (-1)^|m| = (-1)^m
+    mirrored = sign * jnp.conj(flm[..., ::-1])  # (-1)^m conj(f_{l,-m->+m})
+    flm = jnp.where(m_vals < 0, mirrored, flm)
+    flm = jnp.where(m_vals == 0, flm.real.astype(flm.dtype), flm)
+    return flm
 
 
 def grid_to_spectral(grid_state: GridState, config: TransformConfig) -> SpectralState:
@@ -240,7 +315,7 @@ def grid_to_spectral(grid_state: GridState, config: TransformConfig) -> Spectral
 
     def transform_level(u, v, temp, tracers):
         # 1. Scalar transforms
-        flm_temp = s2fft.forward_jax(temp, L, sampling=sampling)
+        flm_temp = s2_forward(temp, L, sampling)
 
         # 2. Vector transforms (u, v -> vort, div)
         # Use BOTH spin+1 and spin-1 forward transforms to correctly
@@ -260,8 +335,8 @@ def grid_to_spectral(grid_state: GridState, config: TransformConfig) -> Spectral
         f_plus = -v + 1j * u  # spin +1 input
         f_minus = v + 1j * u  # spin -1 input
 
-        F1_lm = s2fft.forward_jax(f_plus, L, spin=1, sampling=sampling)
-        Fm1_lm = s2fft.forward_jax(f_minus, L, spin=-1, sampling=sampling)
+        F1_lm = s2_forward(f_plus, L, sampling, spin=1)
+        Fm1_lm = s2_forward(f_minus, L, sampling, spin=-1)
 
         result_p = l_factor[:, None] * F1_lm / radius  # D + i*zeta
         result_m = l_factor[:, None] * Fm1_lm / radius  # D - i*zeta
@@ -270,7 +345,7 @@ def grid_to_spectral(grid_state: GridState, config: TransformConfig) -> Spectral
         flm_vort = (result_p - result_m) / (2j)
 
         # 3. Tracers
-        flm_tracers = jax.vmap(lambda f: s2fft.forward_jax(f, L, sampling=sampling))(
+        flm_tracers = jax.vmap(lambda f: s2_forward(f, L, sampling))(
             tracers
         )
 
@@ -283,7 +358,7 @@ def grid_to_spectral(grid_state: GridState, config: TransformConfig) -> Spectral
         grid_state.tracers.transpose(1, 0, 2, 3),
     )
 
-    flm_lnps = s2fft.forward_jax(grid_state.log_surface_pressure, L, sampling=sampling)
+    flm_lnps = s2_forward(grid_state.log_surface_pressure, L, sampling)
 
     # Enforce exact triangular truncation limit
     flm_vort = enforce_triangular_truncation(flm_vort, L, T)
@@ -321,14 +396,14 @@ def grid_to_spectral_tendencies(
     l_factor = jnp.sqrt(l_arr * (l_arr + 1))
 
     # temp, lnps, tracers are scalars
-    flm_temp = jax.vmap(lambda f: s2fft.forward_jax(f, L, sampling=sampling))(
+    flm_temp = jax.vmap(lambda f: s2_forward(f, L, sampling))(
         grid_tends.temp_tend
     )
 
-    flm_lnps = s2fft.forward_jax(grid_tends.log_ps_tend, L, sampling=sampling)
+    flm_lnps = s2_forward(grid_tends.log_ps_tend, L, sampling)
 
     def forward_tracers(tracers):
-        return jax.vmap(lambda f: s2fft.forward_jax(f, L, sampling=sampling))(tracers)
+        return jax.vmap(lambda f: s2_forward(f, L, sampling))(tracers)
 
     flm_tracers = jax.vmap(forward_tracers)(grid_tends.tracer_tends)
 
@@ -339,8 +414,8 @@ def grid_to_spectral_tendencies(
         f_plus = -v_flux + 1j * u_flux  # spin +1 input
         f_minus = v_flux + 1j * u_flux  # spin -1 input
 
-        F1_lm = s2fft.forward_jax(f_plus, L, spin=1, sampling=sampling)
-        Fm1_lm = s2fft.forward_jax(f_minus, L, spin=-1, sampling=sampling)
+        F1_lm = s2_forward(f_plus, L, sampling, spin=1)
+        Fm1_lm = s2_forward(f_minus, L, sampling, spin=-1)
 
         result_p = l_factor[:, None] * F1_lm / radius  # div(flux) + i*curl(flux)
         result_m = l_factor[:, None] * Fm1_lm / radius  # div(flux) - i*curl(flux)
@@ -366,7 +441,7 @@ def grid_to_spectral_tendencies(
 
     # Add KE Laplacian to divergence tendency
     def add_ke_laplacian(ke, div_tend):
-        ke_lm = s2fft.forward_jax(ke, L, sampling=sampling)
+        ke_lm = s2_forward(ke, L, sampling)
         laplacian_ke = -(l_arr * (l_arr + 1))[:, None] * ke_lm / (radius**2)
         return div_tend - laplacian_ke
 

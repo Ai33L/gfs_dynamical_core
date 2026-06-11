@@ -305,8 +305,8 @@ def init_diffusion_operators(
 
     # --- ndiss, efold, fshk (GFS defaults) ---------------------------------
     ndiss = 8
-    hdif_fac = 2.0
-    hdif_fac2 = 2.0
+    hdif_fac = 1.0
+    hdif_fac2 = 1.0
 
     if ntrunc > 170:
         efold = 3600.0 / (hdif_fac2 * (ntrunc / 170.0) ** 4 * 1.1)
@@ -443,8 +443,6 @@ def advance(
 
         return div_new, temp_new, lnps_new
 
-    grid_init, _ = spectral_to_grid(state, trans_config)
-    dump_jax_intermediate(grid_init, state, jax_debug_step, 0)
     # --- Stage 1 ---
     tends_orig = get_spectral_tendencies(
         state, phis_grads, dyn_config, trans_config, latitudes
@@ -499,16 +497,6 @@ def advance(
             d_tracers_d_t=tends_orig.d_tracers_d_t,
         )
 
-    grid1, _ = spectral_to_grid(
-        SpectralState(
-            vorticity=vort1,
-            divergence=div1,
-            temperature=temp1,
-            log_surface_pressure=lnps1,
-            tracers=tracers1,
-        ),
-        trans_config,
-    )
     state1 = SpectralState(
         vorticity=vort1,
         divergence=div1,
@@ -516,8 +504,6 @@ def advance(
         log_surface_pressure=lnps1,
         tracers=tracers1,
     )
-    grid1, _ = spectral_to_grid(state1, trans_config)
-    dump_jax_intermediate(grid1, state1, jax_debug_step, 1)
 
     # --- Stage 2 ---
     tends1 = get_spectral_tendencies(
@@ -589,16 +575,6 @@ def advance(
             d_tracers_d_t=tends1.d_tracers_d_t,
         )
 
-    grid2, _ = spectral_to_grid(
-        SpectralState(
-            vorticity=vort2,
-            divergence=div2,
-            temperature=temp2,
-            log_surface_pressure=lnps2,
-            tracers=tracers2,
-        ),
-        trans_config,
-    )
     state2 = SpectralState(
         vorticity=vort2,
         divergence=div2,
@@ -606,8 +582,6 @@ def advance(
         log_surface_pressure=lnps2,
         tracers=tracers2,
     )
-    grid2, _ = spectral_to_grid(state2, trans_config)
-    dump_jax_intermediate(grid2, state2, jax_debug_step, 2)
 
     # --- Stage 3 ---
     tends2 = get_spectral_tendencies(
@@ -708,15 +682,15 @@ def advance(
         log_surface_pressure=lnps3,
         tracers=tracers3,
     )
-    grid3, _ = spectral_to_grid(final_state, trans_config)
 
     # Post-RK dry-mass fixer: applied after the complete IMEX RK scheme,
     # matching Fortran run.f90 lines 357-360 (`if (massfix) then`).
     # This must NOT run inside the RK stages — doing so corrupts the implicit
     # gravity-wave solve by replacing the physical lnps tendency with ~0.
     if gauss_weights is not None and pdryini is not None:
+        grid3, _ = spectral_to_grid(final_state, trans_config)
         press_diag = compute_pressure_diagnostics(
-            grid3.log_surface_pressure, dyn_config
+            grid3.log_surface_pressure.real, dyn_config
         )
         fixer_tend = compute_dry_mass_fixer(
             ps=press_diag.ps,
@@ -738,5 +712,4 @@ def advance(
             tracers=final_state.tracers,
         )
 
-    dump_jax_intermediate(grid3, final_state, jax_debug_step, 3)
     return final_state
