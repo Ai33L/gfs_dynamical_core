@@ -16,7 +16,7 @@ from gfs_dynamical_core.jax.transforms import TransformConfig, get_gaussian_lati
 
 def get_mock_config(n_lev):
     ak = jnp.zeros(n_lev + 1)
-    bk = jnp.linspace(0, 1, n_lev + 1)
+    bk = jnp.linspace(1, 0, n_lev + 1)  # BTT: surface (k=0) bk=1, TOA bk=0
     dbk = bk[1:] - bk[:-1]
     ck = ak[1:] * bk[:-1] - ak[:-1] * bk[1:]
 
