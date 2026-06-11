@@ -1,7 +1,6 @@
 import jax
 import jax.numpy as jnp
 from flax import struct
-from typing import Optional
 
 from .states import GridGradients, GridState, SpectralState, SpectralTendencies
 from .transforms import (
@@ -461,9 +460,9 @@ def get_spectral_tendencies(
     dyn_config: DynamicsConfig,
     trans_config: TransformConfig,
     latitudes: jnp.ndarray,
-    gauss_weights: Optional[jnp.ndarray] = None,
-    pdryini: Optional[float] = None,
-    dt: Optional[float] = None,
+    gauss_weights: jnp.ndarray | None = None,
+    pdryini: float | None = None,
+    dt: float | None = None,
 ) -> SpectralTendencies:
     """Computes spectral tendencies from spectral state."""
     grid_state, grid_grads = spectral_to_grid(spec_state, trans_config)
