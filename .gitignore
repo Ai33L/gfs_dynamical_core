@@ -85,3 +85,7 @@ debug_data/
 *.rej
 *.patch
 *.png
+
+.DS_Store
+graphify-out/
+gfs_dynamical_core/_lib/shtns-2.7-r557/
