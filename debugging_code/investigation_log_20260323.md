@@ -1308,3 +1308,620 @@ python3 compare_per_level.py 2>&1 | tee compare_per_level_output.txt
    values, diffusion profile).
 3. Consider testing with `ntrunc=30` (even stronger effective diffusion
    via reduced resolution) to see if the blow-up can be fully prevented.
+
+## 2026-04-18 — Phase 1 dump alignment bug fixed (code-reading + build verification)
+
+**Symptom.** The Fortran `getdyntend` dump file was 65024 bytes short of
+expected (1 × nlons × nlats × 8 = one 2D slab missing). Block 3 onwards
+read misaligned values: `psg` showed 0.0 instead of ~1e5 Pa, `dlnpsdt`
+≈ 1e-15.
+
+**Root cause.** In `pressure_data.f90:75`, the Python-supplied
+`pyInterfacePressure` target is declared with shape `(nlons,nlats,nlevs)`
+even though Python allocates `(nlevs+1, nlats, nlons)` behind it and
+`calc_pressdata` writes `pk(:,:,k)` for k=1..nlevs+1. The production
+dycore works because the underlying memory is big enough, but
+`write(iu) pk` in the dump subroutine emits only `nlons*nlats*nlevs`
+doubles (Fortran honours the pointer's declared shape, not the target
+memory size) — exactly the one-2D-slab shortfall.
+
+**Fix (dump-only, production code untouched).** In
+`dump_dyntend_intermediates` (`dyn_run.f90`), rebound `pk` to its true
+shape with `c_f_pointer`:
+
+```fortran
+real(r_kind), pointer :: pk_full(:,:,:) => null()
+call c_f_pointer(c_loc(pk(1,1,1)), pk_full, [nlons, nlats, nlevs+1])
+...
+write(iu) pk_full   ! was: write(iu) pk
+```
+
+Only touches the dump subroutine; `pressure_data.f90` declaration is
+unchanged so the live dycore ABI is preserved.
+
+**Verification.** After rebuild, `ls -l debug_data/fortran_dyntend_call_00001.bin`
+reports the expected 34213100 bytes. Loader pass and D1.x test pending.
+
+## 2026-04-19 — D1.1 FAIL: toa_pressure mismatch (numerical-test)
+
+**Test.** `tests/test_phase1_dynamics.py::test_d1_1_pressure_diagnostics`
+feeds the dumped `log_surface_pressure` from
+`debug_data/fortran_dyntend_call_00001.bin` into
+`gfs_dynamical_core.jax.dynamics.compute_pressure_diagnostics` and
+compares `pk/dp/prs/alfa/rlnp` against the Fortran dump. Config built
+from the same climt default state the production run uses.
+
+**Result.** `ps` matches (< 1e-12); `pk` fails with relative error
+**2.0e-4**. JAX `pk[0] = 100020 Pa` vs Fortran `pk[0] = 100000 Pa` at
+ps = 100000 Pa. Exactly `ak[TOA] = 20 Pa` off at every interface.
+
+**Root cause.** Both implementations use the same formula,
+`pk(k) = ak(k) + bk(k) * (ps - toa_pressure)`. The mismatch is in
+`toa_pressure`:
+
+* Fortran: reads `top_of_model_pressure` constant (set to 20 Pa in
+  `gfs_dynamical_core/__init__.py:7` via
+  `sympl.set_constant("top_of_model_pressure", 20.0, "Pa")`). The
+  Python binding passes this as `py_ptoa` and Fortran stores it in
+  `params.f90:toa_pressure`. `pressure_data.f90:111` then uses it in
+  the pk formula.
+* JAX: hardcoded `toa_pressure=0.0` in `component_jax.py:116` when
+  building `DynamicsConfig`.
+
+**Consequence.** `pk_surf_JAX = ps + ak[TOA] = ps + 20` vs
+`pk_surf_F = ps`. The 20 Pa bias propagates through every downstream
+pressure-dependent quantity: `dp`, `prs`, `alfa`, `rlnp`, the
+vertical-velocity integrals, the PGF geopotential and temperature
+integrals, and the energy conversion term. Does NOT obviously explain
+the 2.2% m=0 v error on its own (20/1e5 is 0.02%, not 2.2%), but is a
+real systematic bias that Phase 0 could not have caught because it's
+a config-level issue, not a transform issue.
+
+**Status.** Bug identified, fix not applied. Proposed fix is a
+one-line change in `component_jax.py:116` — read
+`get_constant("top_of_model_pressure", "Pa")` the same way the
+Fortran wrapper does in `component.py:241`. Once fixed, re-run D1.1
+and continue through D1.2..D1.9.
+
+**Why this was missed by prior code-reading passes.** The
+`toa_pressure=0.0` line is explicit and visible. Multiple reviews
+compared it to the JAX dynamics formula in isolation and noted the
+formula matches Fortran. What they missed is that Fortran's
+`toa_pressure` comes from a sympl constant, not a hardcoded 0. The
+mismatch is only visible when you look at both sides of the binding
+simultaneously — which is exactly what D1.1 does by feeding the same
+`lnpsg` through both and comparing outputs. Validates the Phase 1
+approach.
+
+### D1.1 RESOLVED (code-reading + numerical-test)
+
+**Fix.** Replaced hardcoded `toa_pressure=0.0` in
+`gfs_dynamical_core/component_jax.py:116` with
+`get_constant("top_of_model_pressure", "Pa")` — mirrors the Fortran
+wrapper's pattern at `component.py:241`. One-line change.
+
+**After fix.** `ps, pk, dp, prs` all match Fortran to < 1e-12 relative
+error. Interior layers of `alfa` and `rlnp` also match at machine
+precision (< 1e-12). Two benign TOA-only differences, documented in
+`tests/test_phase1_dynamics.py::test_d1_1_pressure_diagnostics` and
+asserted explicitly rather than hidden:
+
+* **`rlnp[-1]` sentinel**: Fortran stores the documented
+  `99999.99` sentinel (`pressure_data.f90:126`, "doesn't matter,
+  should never be used"); JAX stores `0.0`. Neither value is meant
+  to enter downstream computations at the top layer — downstream
+  code overwrites or skips the top-layer rlnp. Verify during D1.2
+  (vertical velocities) that this is indeed unused; if either
+  value leaks, that is a separate bug.
+* **`alfa[-1]` float32 literal**: Fortran sets
+  `alfa(:,:,1) = log(2.)` where `2.` is a default-kind real(4)
+  literal, so the stored value is `float32(log(2)) ≈ 0.6931471824`
+  promoted to float64 — ~1.9e-9 absolute error vs the true
+  double-precision `log(2)`. JAX's `jnp.log(2.0)` is the more
+  precise representation. The Fortran imprecision is a historical
+  artifact that has been present since the original code; no
+  change warranted.
+
+**D1.1 status: PASS.** Phase 1 unblocked. Next: D1.2 (vertical
+velocities), which consumes the pressure diagnostics plus grid
+gradients. Good test for whether the TOA rlnp sentinel actually
+leaks anywhere.
+
+**Open question for later.** The 20 Pa bias in `pk` at surface
+(before fix) is 0.02% — not the full 2.2% m=0 v error — but it was
+propagating through every pressure-dependent downstream computation.
+Now that it's eliminated, re-running a full integration and checking
+whether the v-error changed magnitude would be a cheap diagnostic.
+Deferring until Phase 1 completes or until we hit another hit worth
+pausing on.
+
+## 2026-04-19 — D1.2 PASS (numerical-test)
+
+**Test.** `test_d1_2_vertical_velocities` feeds the dumped grid
+state + gradients into `compute_vertical_velocities` with JAX's own
+pressure diagnostics (which D1.1 proved match Fortran).
+
+**Result.** All three outputs pass:
+
+| output | max rel err | notes |
+|---|---|---|
+| `d_log_ps_d_t` | 2.4e-16 | machine precision, full field |
+| `etadot` | machine precision all levels | TOA and surface are zero in both codes |
+| `omega` interior (k=0..18) | machine precision | — |
+| `omega` TOA (k=19) | 2.7e-9 | inherited from D1.1 alfa[-1] float32 artifact |
+
+**TOA sentinel resolution.** The rlnp[-1]=99999.99 sentinel does
+NOT leak into omega. The TOA omega formula multiplies rlnp[-1] by
+`db_with_zero[1:][-1]` which is the cumulative divergence integral
+from the layer above TOA down to TOA — always zero, since there's
+nothing above TOA. Verified numerically: omega[-1] matches Fortran to
+2.5e-15 absolute (2.7e-9 relative only because omega[TOA] itself is
+small ~1e-11). The 2.7e-9 relative error is the D1.1 alfa[-1] float32
+artifact flowing through the `alfa * (div_dp + ps * cg * dbk)` term;
+the artifact propagates cleanly and is bounded — no new bug.
+
+**Implication.** First two links of the dependency chain (pressure
+diagnostics + vertical velocities) are verified. Moving to D1.3–D1.5
+(vertical advection of u, v, T) which use the same
+`compute_vertical_advection` helper.
+
+## 2026-04-19 — D1.3/D1.4/D1.5 PASS (numerical-test)
+
+**Test.** `test_d1_3_to_d1_5_vertical_advection` — parametrized over
+(u, v, T). Inputs from dump (data + etadot + dp) fed directly to
+`compute_vertical_advection`, comparing against dumped
+`vadv_u`/`vadv_v`/`vadv_t`. Isolates the advection routine from
+upstream.
+
+**Result.** All three < 1e-12 relative error. Clean pass — no
+surprises. Confirms the earlier vertical-advection sign-fix commit
+(334ab88 / 124a5f1) is correct and the BTU-indexed stencil at
+`dynamics.py:181-187` matches Fortran's TTB-indexed `getvadv` after
+axis conversion.
+
+**Next.** D1.6 (pressure gradient force) — the plan flags it as the
+source of 4 prior bugs and the top suspect for the 2.2% v-error.
+
+## 2026-04-19 — D1.6 PASS, D1.7 PASS, D1.8 PASS after loader fix (numerical-test)
+
+**D1.6 (PGF).** Passed after documenting two benign artifacts:
+`pgf_x` lives at noise floor (~1e-15) for the DCMIP dry IC with zonal
+symmetry — test uses absolute tolerance. `pgf_y[-1]` inherits the D1.1
+`alfa[-1]` float32 literal artifact (~7e-12 rel); interior matches at
+machine precision. The prime-suspect PGF is clean.
+
+**D1.7 (energy conversion).** Passed at 1e-12 rel err, clean.
+
+**D1.8 (tendency assembly) — FAIL then RESOLVED.** Initial run showed
+`u_flux` rel err **29.9** and `v_flux` rel err **0.064** — a factor-30
+structural discrepancy, not a TOA artifact.
+
+Diagnostic (code-reading + numerical-test): reconstructed `u_flux =
+u*(vort + f) + (vadv_v - pgf_y)` in python with Coriolis `f` built two
+ways — using `get_gaussian_latitudes` directly (N→S per s2fft) and
+using its reverse (S→N):
+
+```
+u_flux rel err with f using N->S lats = 2.990e+01
+u_flux rel err with f using S->N lats = 5.396e-15
+v_flux rel err with f using N->S lats = 6.388e-02
+v_flux rel err with f using S->N lats = 9.480e-17
+```
+
+Machine-precision match with reversed lats confirms the **loader** was
+flipping the latitude axis incorrectly. SHTNS stores lats N→S natively
+(`shtns_cos_array` gives theta ascending → lat descending = N→S; see
+`shtns.f90:178-183`), and climt also delivers N→S (verified: first lat
+row +87.86°, last −87.86°). `get_gaussian_latitudes` returns N→S to
+match s2fft. So the correct flow is "no flip on load" — but
+`fortran_loader.py::_btu_to_jax` had `[:, ::-1, :]` (and analogous
+flips in `_ttb_to_jax` / `_2d_to_jax` / `_tracers_to_jax`), which
+inverted loaded arrays to S→N.
+
+**Why this went undetected by D1.1–D1.7.** Those tests either feed a
+dump field back into JAX and compare both sides in the same (flipped)
+order, or compute quantities that are lat-symmetric for the DCMIP IC.
+D1.8 is the first test that **combines loaded data with
+internally-computed latitudes** (Coriolis `f`), which is why the
+orientation mismatch finally surfaced.
+
+**Fix** (`tests/fortran_loader.py`): dropped the `[::-1]` on the lat
+axis in all four helpers. Level-flip for TTB → BTU retained (that's
+correct; it's about vertical orientation, not meridional).
+
+**Production impact.** None. `component_jax.py` receives N→S data
+from climt and computes `get_gaussian_latitudes` (N→S) — consistent.
+The bug was confined to the offline test harness.
+
+**Result after fix.** All eight D1.x tests (D1.1–D1.8) now pass at
+the stated tolerances. The tendency-assembly arithmetic, including
+the Coriolis term, matches Fortran at machine precision.
+
+**Implication for the 2.2% v-error.** This loader bug is NOT the
+production bug (production never used this loader). The 2.2% v-error
+remains outstanding; the Phase-1 bottom-up rebuild has now cleared
+every per-function grid-space stage of the tendency pipeline at
+machine precision vs Fortran. Next: D1.9 — spectral-space tendency
+transform (grid_tendencies → spectral tendencies), which exercises
+the forward vector/scalar transforms and is the last grid-side stage
+before the implicit solve.
+
+## 2026-04-19 — D1.9 PASS (numerical-test)
+
+**Test.** `test_d1_9_spectral_tendencies` feeds dumped grid tendencies
+(`u_flux`, `v_flux`, `temp_tend`, `ke`) plus the dumped `d_log_ps_d_t`
+through `grid_to_spectral_tendencies` and compares the result against
+the dumped spectral tendencies (SHTNS-packed → s2fft-rectangular).
+Tracer tendencies are not dumped in grid space, so tracer_tends is set
+to zero and only the four scalar/vector tendencies are asserted.
+
+**Result.**
+
+| output              | max rel err | notes |
+|---------------------|-------------|-------|
+| `d_temperature_d_t` | 4.3e-15     | machine precision (scalar forward) |
+| `d_log_ps_d_t`      | 3.9e-15     | machine precision (2D scalar forward) |
+| `d_vorticity_d_t`   | 3.9e-13     | near machine precision (spin±1 vector path) |
+| `d_divergence_d_t`  | 2.7e-11     | slightly higher — KE-Laplacian add step |
+
+Tolerance set at 1e-10 based on the `d_divergence_d_t` ceiling; the
+others are much tighter. This **exercises both the scalar forward
+(used by T, lnps) and the dual spin±1 vector forward (used by
+vort/div)**, and both agree with Fortran/SHTNS to the transform noise
+floor.
+
+**Implication.** The entire grid-space → spectral-space tendency
+pipeline is now verified bit-for-bit against Fortran at one RK stage
+(stage 0 / call 1) with the DCMIP initial state:
+
+    pressure (D1.1) → vert vels (D1.2) → vert adv u/v/T (D1.3-1.5)
+    → PGF (D1.6) → energy conv (D1.7)
+    → tendency assembly with Coriolis (D1.8)
+    → spectral tendency transform (D1.9)
+
+Every function now reproduces Fortran within 1e-10 or better, and most
+at machine precision. The 2.2% v-error must enter from one of:
+
+1. Downstream of the spectral tendency transform — the implicit solve
+   (`d_hyb_m`, `amhyb`, `bmhyb`), diffusion (`disspec`, `diff_prof`,
+   `dmp_prof`), or the spectral-space update step.
+2. The spectral → grid transform (inverse, for UV reconstruction) used
+   when converting the caching spectral state back to grid space. Note
+   this is NOT exercised by D1.9 (which tests forward only).
+3. Accumulation over many RK stages/timesteps of a very small per-step
+   residual that the current Phase 1 dump (single call) cannot resolve.
+
+Phase 1 is complete. Phase 2 is now warranted: dump and compare the
+spectral state ITSELF (vort/div/T/lnps spectral coefficients) across
+the implicit solve + diffusion step, per RK stage. The current dump
+only covers the forward tendency calculation; extending the dump to
+include post-implicit-solve state would pinpoint which of (1)/(2) is
+responsible.
+
+## 2026-06-10 — Session 11: toa_pressure fix never validated in a full run
+
+### 11a. Key realization [CODE READING]
+
+All full-run blow-up experiments in this log (§18: blow-up at step 2060
+/ day 7.15; §19.1: blow-up at step 2376 / day 8.25 with doubled
+diffusion) were run in **March 2026**, BEFORE the D1.1 `toa_pressure`
+production fix was applied on 2026-04-19. The fix removed a 20 Pa bias
+in every interface pressure, which propagated into dp, prs, alfa, rlnp,
+omega, the PGF, and energy conversion at every level on every step.
+D1.6 shows the PGF went from 0.028% error (§16.2, measured with the bug
+present) to machine precision after the fix. The 2.2% v-error chain
+(§16.3: PGF error × ~16 amplification through u_flux near-cancellation)
+plausibly originated from this bias. **No full integration has ever
+been run with the fix in place.**
+
+### 11b. Working-tree state notes [CODE READING]
+
+- `hdif_fac = 2.0, hdif_fac2 = 2.0` in `stepper.py` (init_diffusion_
+  operators) — this is the §19.1 doubled-diffusion experiment still in
+  the tree. Fortran defaults are 1.0/1.0 (`params.f90:100-101`). With
+  hdif_fac=2.0, fshk=2.0 → diff_prof = sl^log(1/2) gives up to ~13×
+  extra damping at the top level vs Fortran's flat profile. Must be
+  reverted to 1.0/1.0 for a Fortran-parity stability claim.
+- §14.3's unresolved svhyb 0.07 discrepancy: verified by code reading
+  that `component.py:273-274` flips climt's bottom-up ak/bk to
+  top-to-bottom before `set_model_grid`, so Fortran's
+  `init_semimpdata` gets the ordering its algorithm assumes, and the
+  JAX `init_semi_implicit_matrices` is a faithful loop-for-loop port
+  (same flips). The 0.07 was most likely a dump/comparison artifact;
+  moot for the blow-up since explicit mode reproduced it (§14.6).
+
+### 11c. Stability rerun launched [NUMERICAL TEST — in progress]
+
+`debugging_code/run_stability_check.py`: JAX dycore, DCMIP 4.1 with
+perturbation, L=64, T40, 20 levels, dt=5 min, 3456 steps (12 days),
+monitoring ps range / |u|max / T range. Current tree = toa fix +
+doubled diffusion. Prior behavior under doubled diffusion (but with
+the toa bug): blow-up at step 2376. If stable past ~step 2500, rerun
+with hdif_fac=1.0/1.0 for exact Fortran parity.
+
+### 11d. Stability rerun result: blow-up persists [NUMERICAL TEST]
+
+Blow-up at **step 2397 (day 8.32)**: ps [803.6, 1141.3] hPa, |u|max
+418 m/s. Statistically identical to the pre-fix doubled-diffusion run
+(step 2376 / day 8.25, §19.1). Wave development up to day ~7 tracks
+the stable Fortran reference closely (ps min at steps 1000/1500/2000:
+998.75/996.25/986.65 vs Fortran 998.74/996.21/986.89).
+**The toa_pressure fix does NOT cure the blow-up.**
+
+### 11e. toa fix DOES eliminate the 2.2% v-error [NUMERICAL TEST]
+
+Re-ran `debugging_code/examples/compare_dycores.py` (50 steps, no
+perturbation, dt=5 min) with the toa fix. First attempt was
+conflated: JAX still had hdif_fac=2.0 (§19.1 leftover) vs Fortran 1.0,
+which showed up directly as a u error of 1.5e-2 (doubled damping of
+the jet's high-l content). After reverting stepper.py to
+hdif_fac=1.0/1.0 (Fortran parity):
+
+| field | step-1 rel err §12.1 (pre-fix) | step-1 rel err now | step-50 now |
+|-------|-------------------------------|--------------------|-------------|
+| u | 3.79e-08 | 7.2e-10 | 3.0e-07 |
+| v | **2.20e-02** | **2.9e-04** | 4.6e-04 |
+| T | 2.75e-09 | 1.3e-09 | 1.7e-07 |
+| ps | 5.5e-09 | 2.5e-09 | 1.3e-07 |
+
+The 2.2% v-error of §12.1 is resolved by the toa_pressure fix (75×
+reduction). Residual v error ~3e-4 oscillates (peaks 2e-3 at step 20),
+consistent with gravity-wave-phase-level differences; source not yet
+identified (could be roundoff amplified by the u_flux near-
+cancellation, could be a small real difference).
+
+**Implication:** the v-error and the blow-up were SEPARATE issues.
+The blow-up survives with its timing unchanged despite the dynamics
+now matching Fortran ~100× more closely at early times. Next: full
+12-day side-by-side run (perturbation ON, diffusion parity) to see
+whether JAX still blows up at 1× diffusion and where the trajectories
+separate.
+
+### 11f. Perturbed-Fortran control: configuration is NOT marginal [NUMERICAL TEST]
+
+`/tmp/gfs_fortran_ctrl/fortran_perturbed_run.py`: Fortran dycore only,
+DCMIP 4.1 + perturbation + 1e-6 m/s Gaussian noise on u (seed 42),
+12 days, dt=5 min, default diffusion. **Result: STABLE through all
+3456 steps**, ending in a healthy mature baroclinic wave (ps range
+[925.5, 1031.9] hPa, |u|max 46.5 m/s at day 11.8). Runtime ~330 s
+(~0.1 s/step — Fortran is ~15× faster than eager JAX).
+
+This kills the "marginal configuration / chaotic luck" hypothesis
+(§18.9): Fortran is robust to perturbations at this resolution and
+diffusion. The JAX blow-up is a real JAX-side defect that engages at
+finite amplitude. Note: with the perturbation on, the side-by-side v
+rel err grows to ~8e-2 within 100 steps even though the unperturbed
+case matches at 3e-4 — consistent with Fortran-explicit vs JAX-IMEX
+treating the perturbation-excited gravity waves differently; this is
+scheme difference, not necessarily defect.
+
+### 11g'. Finite-amplitude tendency harness [NUMERICAL TEST]
+
+New script `debugging_code/test_finite_amplitude_tendencies.py`: loads
+Fortran's per-step spectral dump (state at step N, stage-1 total
+tendencies at step N+1, which are computed from state N), feeds state N
+through JAX `get_spectral_tendencies`, compares in SHTNS packed space
+(CS-corrected). This tests the complete shared tendency path
+(inverse transforms → dynamics → forward transforms) at ARBITRARY
+amplitude — closing the D1.x gap that all Phase 1 tests used the
+near-balanced IC where vadv/omega/energy-conversion ≈ 0.
+
+Pitfall found while writing it: passing phis_grads=0 gives a CONSTANT
+6.79e-10 absolute error in the div tendency only (vrt clean at 2e-23)
+— the JW06 surface geopotential is nonzero (max ~3.1e3 m²/s²), and a
+static ∇φs error is curl-free (vrt unaffected) but not
+divergence-free. Diagnostic signature worth remembering.
+
+With the correct phis (computed exactly as component_jax does):
+
+| step | vrt_rel | div_rel | T_rel | lnps_rel |
+|------|---------|---------|-------|----------|
+| 1    | 9.1e-12 | 1.3e-08 | 1.5e-09 | 4.1e-12 |
+| 50   | 3.1e-12 | 2.9e-09 | 2.0e-09 | 4.3e-12 |
+| 150  | 3.5e-12 | 3.4e-09 | 1.5e-09 | 5.0e-12 |
+| 250  | 1.4e-12 | 3.9e-09 | 2.4e-09 | 4.9e-12 |
+| 350  | 2.3e-12 | 3.4e-09 | 2.5e-09 | 5.0e-12 |
+
+**The shared tendency path matches Fortran to ≤4e-9 relative at every
+sampled step.** (Small residual plausibly the post-dump mass-fixer
+lnps adjustment between dump N and the true start of step N+1, plus
+transform noise.) Will re-run at steps 1400–2300 once the side-by-side
+run generates those dumps — if it stays at this level through wave
+breaking, the tendency path is exonerated at all amplitudes and the
+defect must be in the spectral update (IMEX/diffusion) or is JAX-
+trajectory-specific.
+
+### 11g. JAX explicit-mode 12-day run launched [NUMERICAL TEST — in progress]
+
+`/tmp/gfs_jax_explicit/jax_explicit_run.py`: JAX with explicit=True
+(StepperConfig patched), otherwise identical to §11d setup but with
+hdif_fac=1.0. Re-validates the pre-fix "explicit also blows up"
+memory under the fixed code. Outcome attribution:
+- stable → defect in the IMEX path (linear split / implicit solve)
+- unstable → defect in the shared tendency or diffusion path
+
+### 11h. Both schemes blow up; tendency map exonerated at ALL amplitudes [NUMERICAL TEST]
+
+- Side-by-side (JAX IMEX vs Fortran, 1× diffusion): JAX blew at step
+  2126 (day 7.38), Fortran healthy — reproduces history.
+- JAX explicit blew at step 1999 (day 6.94) → **IMEX path exonerated**.
+- `test_finite_amplitude_tendencies.py` extended through step 2120
+  (Fortran-trajectory states, full wave breaking): JAX total tendencies
+  match Fortran at ≤6.5e-9 rel for every field at every sampled step.
+  **Shared tendency path exonerated at all amplitudes.**
+
+### 11i. Blow-up postmortem: SH ghost instability [NUMERICAL TEST]
+
+`analyze_blowup_snapshots.py` + `analyze_sh_growth.py` on compare_long
+snapshots: the runaway lives at l≈30–38 / m≈11–15, strongest at the
+top level, on the **Southern-Hemisphere jet flank** (−40°→−57°) — far
+from the NH wave; the SH is unperturbed in DCMIP 4.1. Fortran's SH
+eddies decay (0.48→0.18 m/s); JAX's plateau then grow exponentially
+from ~day 5.5 with **e-fold ≈ 65–72 steps (5.5 h)** — far faster than
+physical baroclinic growth (~1/day).
+
+### 11j. Restart experiments: per-step maps identical; grid roundtrip "cures" JAX [NUMERICAL TEST]
+
+`restart_comparison.py` (both dycores restarted from Fortran's healthy
+step-2000 state via grid fields; JAX explicit): glued at roundoff
+(max|du| 4e-6 after 480 steps, linear growth), both stable past day
+8.6. `cross_restart.py` (both restarted from **JAX's own degraded
+step-1800 state**, SH eddy already 6.7 m/s): both **recover** — SH
+eddy decays identically in F and J, explicit AND IMEX variants. Yet
+the original running JAX continued from that very state and blew up
+326 steps later. **The only difference: the restart passes the state
+through real-valued grid fields, while the running component keeps
+its cached complex spectral state.** (`to_numpy` takes `.real` at the
+sympl boundary, but the internal cache never does.)
+
+### 11k. ROOT CAUSE: reality-symmetry violation = undamped tangent-linear ghost mode [NUMERICAL TEST]
+
+`check_reality_symmetry.py` measured `f(l,−m) − (−1)^m conj(f(l,+m))`
+in the JAX cached spectral snapshots:
+
+| step | div violation / scale |
+|------|----------------------|
+| 800  | 2.8e-08 |
+| 1200 | 9.9e-06 |
+| 1600 | 4.6e-03 |
+| 2000 | **9.9e-02** |
+
+Pure exponential, e-fold = 1200/ln(6.6e7) ≈ **66 steps = 5.5 h —
+exactly the SH instability growth rate (§11i)**.
+
+Mechanism: s2fft stores the full (l, ±m) rectangle and treats fields
+as general complex functions. A real field requires
+f(l,−m) = (−1)^m conj(f(l,+m)); SHTNS enforces this by construction
+(stores m≥0 only, real synthesis) — the JAX pipeline never did.
+Roundoff (mainly the dual-spin ± forward combinations) seeds a tiny
+violation; the violation is exactly an imaginary-valued grid field,
+which evolves as an **undamped tangent-linear perturbation** of the
+flow. It rides the jet's fastest baroclinic modes (m=11–15: the SH
+jet's most unstable waves), e-folds every ~5.5 h, and after ~34
+e-folds (≈7.9 days from an O(1e-16) seed — matching the observed
+blow-up window) feeds back into the real part through nonlinear terms
+(exp(lnps), field products) and destroys the solution.
+
+Explains every prior observation: IMEX and explicit both blow up
+(shared representation); 2× diffusion only delays ~1 day (weak damping
+of l≈30 modes barely dents σ); every map test passed (tests always fed
+reality-symmetric states); restarts through grid fields reset Im→0 and
+recover; Fortran (real arithmetic, m≥0 storage) is structurally immune.
+
+### 11l. FIX [CODE CHANGE + TESTS]
+
+`enforce_triangular_truncation` (transforms.py) now additionally
+(a) zeroes the invalid |m|>l corner, (b) rebuilds negative-m modes
+from positive-m (matching Fortran/SHTNS semantics), and (c) zeroes
+Im at m=0. It is applied at every forward-transform output
+(grid_to_spectral, grid_to_spectral_tendencies, mass-fixer target);
+all real-coefficient linear ops (RK, implicit solve, diffusion)
+preserve the symmetry exactly in IEEE arithmetic, so the cached state
+stays symmetric for all time and the ghost mode can no longer grow.
+
+Verification so far: real-field forward violation 7e-17 → enforcement
+exact 0; band-limited roundtrip exact (1.5e-13); Phase 0+1 suites
+17/17 pass. 12-day stability run with the fix (IMEX, hdif_fac=1.0,
+full Fortran parity) launched — `stability_check_fixed_*.log`, with
+the div-asymmetry of the cached state instrumented per 50 steps.
+
+### 11n. FINAL VALIDATION: 12-day run STABLE [NUMERICAL TEST]
+
+`stability_check_fixed_20260611_0724.log`: JAX dycore with the
+reality-symmetry fix, DCMIP 4.1 + perturbation, IMEX, dt=5 min,
+hdif_fac=1.0 (full Fortran parity), 3456 steps. **Completed all 12
+days without blow-up** (runtime 78 min). The instrumented div
+asymmetry stayed exactly 0.0 throughout, confirming the IEEE
+preservation argument. Final state at step 3400 matches the
+perturbed-Fortran control at the same step to 0.01 hPa / 0.01 m/s:
+
+| | ps_min | ps_max | u_max |
+|---|---|---|---|
+| Fortran control | 925.47 | 1031.92 | 46.48 |
+| JAX (fixed)     | 925.47 | 1031.93 | 46.48 |
+
+Previously this configuration blew up at day 6.9 (explicit), 7.15-7.38
+(IMEX 1× diffusion), 8.25-8.32 (IMEX 2× diffusion). **The blow-up
+investigation is closed.**
+
+### 11o. NEW BUG (Fortran wrapper): physics tendencies scrambled by non-contiguous views [NUMERICAL TEST]
+
+While setting up the Held-Suarez comparison (climt.HeldSuarez coupled
+to both dycores), the one-step increment test showed the FORTRAN
+coupling applying wrong wind forcing: u-increment error 6.4e-2 on a
+6.7e-2 signal, and a spurious 1.4e-2 v-increment where the true
+v-tendency is exactly zero. The JAX path (new
+`GFSDynamicsJAX.set_physics_tendencies`, time-split like Fortran's
+getphytend) matched dt·tendency to 1e-4 (pure T40 truncation).
+
+**Root cause:** `component.py::_get_tendencies` returns whatever
+sympl's `get_numpy_arrays_with_properties` produces — a TRANSPOSED
+NON-CONTIGUOUS VIEW (strides showed (lat, lon, lev) memory). The
+Cython `assign_tendencies` takes `&arr[0,0,0]` and Fortran assumes
+dense storage → u/v tendencies scrambled. Temperature survived only
+because the wrapper's `virtual_temp_tend` arithmetic materializes a
+fresh contiguous array. Pre-existing bug, presumably inherited from
+upstream climt; affects ANY run coupling physics tendencies into the
+Fortran dycore (Held-Suarez, etc.). Symptom in HS: surface friction
+misapplied → polar-night jet never equilibrates (|u|max grew 47→288
+m/s over 320 days while JAX equilibrated at 65-80 m/s).
+
+**Fix:** `np.ascontiguousarray` in `_get_tendencies`
+(component.py). After the fix the Fortran one-step increments match
+the JAX ones to the last digit. Fortran HS run restarted with the fix.
+
+### 11p. Final validation results (2026-06-11) [NUMERICAL TEST]
+
+**Baroclinic wave, side-by-side 12-day run (fixed JAX-IMEX vs
+Fortran-explicit, perturbation ON, diffusion parity):** both completed
+12 days. Through the entire nonlinear lifecycle the solutions track to
+max|ps_J − ps_F| ≤ 0.26 hPa (signal ~70 hPa) and
+max|T_J − T_F| ≤ 0.07 K (signal ~8 K). Maps at days 8/10/12 in
+`debugging_code/evidence/5_maps_day*.png`; difference panels blank at
+the shared color scale.
+
+**Held-Suarez climatology (identical climt.HeldSuarez forcing, fixed
+coupling both sides, 400 days, dt=10 min, 200-day spinup + 200-day
+zonal-mean average, 800 samples each):** both dycores produce the
+canonical HS climate; jet cores 35.2 (F) vs 34.3 m/s (J).
+Cross-model differences (max 12.2 m/s / 2.8 K, concentrated near the
+unsponged model top and poles) are WITHIN single-run sampling noise:
+the Fortran run's own NH-SH asymmetry over the same average is
+10.9 m/s / 3.2 K despite hemispherically symmetric forcing. The two
+climatologies are statistically indistinguishable at this averaging
+length. Figure: `evidence/6_heldsuarez_zonal_mean.png`. Tropospheric
+rms differences: 2.8 m/s (u), 0.75 K (T).
+
+**Contiguity question resolved (§11o follow-up):** climt state arrays
+are Fortran-contiguous in the Fortran index convention
+(nlons,nlats,nlevs); the identical buffer is C-contiguous in numpy's
+(mid_levels,lat,lon) view — same bytes, two labels. The broken
+tendency arrays matched NEITHER convention (contiguous in the
+wildcard-component layout (lat,lon,lev)). `np.ascontiguousarray` on
+the (lev,lat,lon) view produces exactly the Fortran-expected layout;
+verified end-to-end (one-step increment == dt·tendency pointwise).
+Also verified the strided view is not an environment regression:
+clean sympl 0.4.1 + xarray 0.16.2 stack produces the same
+non-contiguous view. T and tracer tendencies were always applied
+correctly by construction (fresh contiguous arrays from arithmetic /
+np.empty+copy), which is consistent with years of healthy RCE runs;
+only raw u/v tendencies from wildcard-dims components took the
+strided path.
+
+### 11m. Housekeeping notes
+
+- Running the FULL `tests/` suite from the repo root clobbers
+  `debug_data/fortran_dyntend_call_*.bin` (old integration tests step
+  a small Fortran dycore; the uncommitted dump instrumentation in
+  dyn_run.f90 overwrites the fixtures — test_phase11 sorts before
+  test_phase1_d…). Fixtures are currently clobbered (16×32×28 grid).
+  Correct-grid replacements exist at
+  /tmp/gfs_compare_scratch/debug_data/ (DCMIP perturbed, 127×64×20);
+  `GFS_DUMP_DIR` env override added to test_phase1_dynamics.py and the
+  suites pass against it. Repo fixtures should be replaced (or the
+  dump instrumentation gated by an env var) — left for the user to
+  approve.
+- hdif_fac/hdif_fac2 reverted to 1.0 (stepper.py) — Fortran parity.
+
+
+
