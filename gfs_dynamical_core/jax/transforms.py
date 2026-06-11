@@ -1,7 +1,6 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-import s2fft
 from flax import struct
 from s2fft.precompute_transforms import spherical as _pre_spherical
 from s2fft.precompute_transforms.construct import (

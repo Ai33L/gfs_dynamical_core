@@ -1,4 +1,3 @@
-jax_debug_step = 0
 import os
 from typing import Optional
 
@@ -14,7 +13,9 @@ from .dynamics import (
     get_spectral_tendencies,
 )
 from .states import SpectralState, SpectralTendencies
-from .transforms import spectral_to_grid
+from .transforms import TransformConfig, spectral_to_grid
+
+jax_debug_step = 0
 
 
 def dump_jax_intermediate(grid_state, spec_state, step, stage):
@@ -56,9 +57,6 @@ def dump_jax_intermediate(grid_state, spec_state, step, stage):
         f.write(
             np.array(spec_state.log_surface_pressure).astype(np.complex128).tobytes()
         )
-
-
-from .transforms import TransformConfig
 
 
 @struct.dataclass

@@ -1,7 +1,6 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-import s2fft
 from sympl import Stepper, get_constant
 
 from .jax.dynamics import DynamicsConfig

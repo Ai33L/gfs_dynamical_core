@@ -160,7 +160,6 @@ def compute_vertical_advection(
     Computes vertical advection using second-order centered differences.
     Standardized to BOTTOM-TO-TOP indexing.
     """
-    n_lev = data.shape[0]
     # Fortran getvadv has datag bottom-to-top but etadot TOP-to-bottom.
     # The Fortran middle-layer formula (TTB index k) is:
     #   vadv(nlevs+1-k) = (0.5/dpk(k)) * (
@@ -195,7 +194,6 @@ def compute_vertical_advection_tracers(
     positive-definite flux-limited scheme.
     Standardized to BOTTOM-TO-TOP indexing.
     """
-    n_lev = data.shape[0]
     datag_half = 0.5 * (data[:-1] + data[1:])
     datag_d = data[1:] - data[:-1]
 
