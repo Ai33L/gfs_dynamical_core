@@ -575,6 +575,11 @@ class GFSDynamicalCore(TendencyStepper):
                 new_array = np.empty(shape)
                 new_array[:] = current_array
                 out_arrays[name] = new_array
+            else:
+                # sympl may hand back a transposed (non-contiguous) view;
+                # the Cython layer passes a raw pointer to Fortran, which
+                # assumes dense storage — a strided view gets scrambled.
+                out_arrays[name] = np.ascontiguousarray(current_array)
         return out_arrays
 
     def _get_tracer_tendencies(self, tendencies, T_shape):

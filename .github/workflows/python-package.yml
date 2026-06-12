@@ -13,9 +13,10 @@ jobs:
   build:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python ${{ matrix.python-version }}
@@ -31,7 +32,10 @@ jobs:
       - name: Lint with flake8
         run: |
           # stop the build if there are Python syntax errors or undefined names
-          flake8 --ignore=E501,E226,W504,W605 gfs_dynamical_core/ --count --show-source --statistics
+          flake8 --ignore=E501,E226,W503,W504,W605 gfs_dynamical_core/ --count --show-source --statistics
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: brew install libomp gcc
       - name: Build gfs
         run: |
           TOX_ENV=py$(echo ${{ matrix.python-version }} | tr -d '.')
@@ -39,11 +43,33 @@ jobs:
             gfortran --version
             CLIMT_ARCH=Linux tox -e $TOX_ENV
           elif [ "$RUNNER_OS" == "macOS" ]; then
-            # which gcc #/usr/bin/gcc
-            # which gfortran
+            # Match only versioned binaries (gcc-14), not the gcc-ar /
+            # gcc-nm / gcc-ranlib wrapper scripts Homebrew also installs.
+            export CC=$(ls /opt/homebrew/bin/gcc-[0-9]* | sort -V | tail -1)
+            export FC=$(ls /opt/homebrew/bin/gfortran-[0-9]* | sort -V | tail -1)
+            export F77=$FC
+            $CC --version
+            $FC --version
             CLIMT_ARCH=Darwin tox -e $TOX_ENV
           else
             echo "$RUNNER_OS not supported"
             exit 1
           fi
         shell: bash
+      - name: Show FFTW config log on failure
+        if: failure() && runner.os == 'macOS'
+        run: |
+          LOG=gfs_dynamical_core/_lib/fftw-3.3.6-pl2/log.config.fftw
+          CLOG=gfs_dynamical_core/_lib/fftw-3.3.6-pl2/config.log
+          if [ -f "$LOG" ]; then
+            echo "=== last 100 lines of $LOG ==="
+            tail -100 "$LOG"
+          else
+            echo "$LOG not found"
+          fi
+          if [ -f "$CLOG" ]; then
+            echo "=== last 100 lines of $LOG ==="
+            tail -100 "$CLOG"
+          else
+            echo "$CLOG not found"
+          fi

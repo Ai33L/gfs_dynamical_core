@@ -1,5 +1,5 @@
 module run_mod
-! time step loop for model run.
+! time step test loop for model run.
 ! Public subroutines:
 ! run: main time step loop (advances model state, writes out
 ! data at specified intervals).
@@ -160,7 +160,7 @@ subroutine advance(t)
 !$omp parallel do private(n,rhs)
   do n=1,ndimspec
 ! first remove linear terms from computed tendencies.
-      ddivdtlin_orig(n,:) = -lap(n)*& 
+      ddivdtlin_orig(n,:) = -lap(n)*&
       (matmul(amhyb,virtempspec_orig(n,:)) + tor_hyb(:)*lnpsspec_orig(n))
       ddivspecdt_orig(n,:) = ddivspecdt_orig(n,:) - ddivdtlin_orig(n,:)
       dtvdtlin_orig(n,:) = -matmul(bmhyb,divspec_orig(n,:))
@@ -182,7 +182,7 @@ subroutine advance(t)
       virtempspec(n,:) = virtempspec(n,:) - aa22*dt*matmul(bmhyb,divspec(n,:))
       lnpsspec(n) = lnpsspec(n) - aa22*dt*sum(svhyb(:)*divspec(n,:))
   enddo
-!$omp end parallel do 
+!$omp end parallel do
   endif
 
   ! stage 2
@@ -371,5 +371,14 @@ subroutine advance(t)
   end if
 
 end subroutine advance
+
+
+
+
+
+
+
+
+
 
 end module run_mod

@@ -1,5 +1,8 @@
 import abc
 import os
+os.environ["JAX_PLATFORMS"] = "cpu"
+os.environ["JAX_ENABLE_X64"] = "True"
+
 from glob import glob
 import xarray as xr
 import numpy as np

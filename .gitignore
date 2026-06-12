@@ -78,3 +78,14 @@ target/
 .ipynb_checkpoints/
 .configured_fftw
 .configured_sht
+examples/debug_data/
+debug_data/
+*.bin
+*.orig
+*.rej
+*.patch
+*.png
+
+.DS_Store
+graphify-out/
+gfs_dynamical_core/_lib/shtns-2.7-r557/

@@ -1,0 +1,330 @@
+import jax
+import jax.numpy as jnp
+import numpy as np
+from sympl import Stepper, get_constant
+
+from .jax.dynamics import DynamicsConfig
+from .jax.states import GridState
+from .jax.stepper import (
+    StepperConfig,
+    advance,
+    init_diffusion_operators,
+    init_semi_implicit_matrices,
+)
+from .jax.transforms import (
+    TransformConfig,
+    s2_forward,
+    s2_inverse,
+    get_gaussian_latitudes,
+    grid_to_spectral,
+    spectral_to_grid,
+)
+
+
+class GFSDynamicsJAX(Stepper):
+    """
+    JAX-based implementation of the GFS dynamical core.
+    """
+
+    input_properties = {
+        "air_temperature": {"units": "K", "dims": ["mid_levels", "lat", "lon"]},
+        "eastward_wind": {"units": "m s^-1", "dims": ["mid_levels", "lat", "lon"]},
+        "northward_wind": {"units": "m s^-1", "dims": ["mid_levels", "lat", "lon"]},
+        "surface_air_pressure": {"units": "Pa", "dims": ["lat", "lon"]},
+        "specific_humidity": {
+            "units": "kg kg^-1",
+            "dims": ["mid_levels", "lat", "lon"],
+        },
+        "surface_geopotential": {"units": "m^2 s^-2", "dims": ["lat", "lon"]},
+        "atmosphere_hybrid_sigma_pressure_a_coordinate_on_interface_levels": {
+            "units": "dimensionless",
+            "dims": ["interface_levels"],
+            "alias": "a_coord",
+        },
+        "atmosphere_hybrid_sigma_pressure_b_coordinate_on_interface_levels": {
+            "units": "dimensionless",
+            "dims": ["interface_levels"],
+            "alias": "b_coord",
+        },
+    }
+
+    output_properties = {
+        "air_temperature": {"units": "K", "dims": ["mid_levels", "lat", "lon"]},
+        "eastward_wind": {"units": "m s^-1", "dims": ["mid_levels", "lat", "lon"]},
+        "northward_wind": {"units": "m s^-1", "dims": ["mid_levels", "lat", "lon"]},
+        "surface_air_pressure": {"units": "Pa", "dims": ["lat", "lon"]},
+        "specific_humidity": {
+            "units": "kg kg^-1",
+            "dims": ["mid_levels", "lat", "lon"],
+        },
+    }
+
+    diagnostic_properties = {}
+
+    def __init__(self, adiabatic=False, **kwargs):
+        super().__init__(**kwargs)
+        self.adiabatic = adiabatic
+        self.dyn_config = None
+        self.trans_config = None
+        self.stepper_config = None
+        self._phis_grads = None
+        self._latitudes = None
+        # Dry-mass fixer state (computed once from the initial state).
+        # Not used when adiabatic=True (matches Fortran run.f90 line 330).
+        self._gauss_weights = None
+        self._pdryini = None
+
+        # JIT-compile the stepper. All config dataclasses are flax structs
+        # (static fields marked pytree_node=False), so they trace cleanly.
+        # First call compiles (~30 s); subsequent steps run fully fused.
+        self._jit_advance = jax.jit(advance)
+        # Cached spectral state: only do grid_to_spectral once (for the
+        # initial condition).  After that, advance directly in spectral
+        # space to avoid repeated grid→spectral→grid round-trip errors.
+        self._spec_state = None
+        # Optional physics tendencies (numpy/jnp grid arrays), applied
+        # time-split after the dynamics step — mirrors Fortran run.f90's
+        # getphytend adjustment and the wrapper's assign_tendencies path.
+        self._phys_tendencies = None
+
+    def set_physics_tendencies(self, u_tend=None, v_tend=None, t_tend=None):
+        """Set grid-space physics tendencies (e.g. Held-Suarez forcing) to be
+        applied as a time-split adjustment after the next dynamics step.
+
+        Arrays must be (n_lev, n_lat, n_lon) bottom-to-top, SI units
+        (m s^-2 for winds, K s^-1 for temperature). Call with no arguments
+        to clear. Mirrors Fortran: tendencies are computed from the state
+        at the START of the step and applied AFTER dynamics as
+        ``x += dt * tendency`` (run.f90 physics block).
+        """
+        if u_tend is None and v_tend is None and t_tend is None:
+            self._phys_tendencies = None
+        else:
+            self._phys_tendencies = (
+                jnp.asarray(u_tend),
+                jnp.asarray(v_tend),
+                jnp.asarray(t_tend),
+            )
+
+    def _apply_physics_tendencies(self, spec_state, dt):
+        """Convert grid physics tendencies to spectral and apply time-split."""
+        from .jax.states import SpectralState
+        from .jax.transforms import enforce_triangular_truncation
+
+        u_t, v_t, t_t = self._phys_tendencies
+        L = self.trans_config.L
+        sampling = self.trans_config.sampling
+        radius = self.dyn_config.radius
+        T = self.trans_config.truncation
+
+        l_arr = jnp.arange(L)
+        l_factor = jnp.sqrt(l_arr * (l_arr + 1))
+
+        def uv_to_vrtdiv(u, v):
+            F1 = s2_forward(-v + 1j * u, L, sampling, spin=1)
+            Fm1 = s2_forward(v + 1j * u, L, sampling, spin=-1)
+            rp = l_factor[:, None] * F1 / radius
+            rm = l_factor[:, None] * Fm1 / radius
+            return (rp - rm) / 2j, (rp + rm) / 2  # vort, div
+
+        vort_t, div_t = jax.vmap(uv_to_vrtdiv)(u_t, v_t)
+        temp_t = jax.vmap(lambda f: s2_forward(f, L, sampling))(t_t)
+
+        vort_t = enforce_triangular_truncation(vort_t, L, T)
+        div_t = enforce_triangular_truncation(div_t, L, T)
+        temp_t = enforce_triangular_truncation(temp_t, L, T)
+
+        return SpectralState(
+            vorticity=spec_state.vorticity + dt * vort_t,
+            divergence=spec_state.divergence + dt * div_t,
+            temperature=spec_state.temperature + dt * temp_t,
+            log_surface_pressure=spec_state.log_surface_pressure,
+            tracers=spec_state.tracers,
+        )
+
+    def array_call(self, state, timestep):
+        u = jnp.array(state["eastward_wind"])
+        v = jnp.array(state["northward_wind"])
+        temp = jnp.array(state["air_temperature"])
+        ps = jnp.array(state["surface_air_pressure"])
+        q = jnp.array(state["specific_humidity"])
+        phis = jnp.array(state["surface_geopotential"])
+
+        ak_jnp = jnp.array(state["a_coord"])
+        bk_jnp = jnp.array(state["b_coord"])
+
+        n_lev, n_lat, n_lon = temp.shape
+        dt = timestep.total_seconds()
+
+        if self.dyn_config is None:
+            # dbk = bk_below - bk_above (to be positive)
+            # bk is bottom-up: [1.0 (surf), ..., 0.0 (toa)]
+            # dbk[k] = bk_below - bk_above = bk[k] - bk[k+1]
+            dbk = bk_jnp[:-1] - bk_jnp[1:]
+            # ck[k] = ak_below*bk_above - ak_above*bk_below = ak[k]*bk[k+1] - ak[k+1]*bk[k]
+            # This matches the Fortran convention: ck(k) = ak(k+1)*bk(k) - ak(k)*bk(k+1)
+            # where Fortran ak/bk are top-to-bottom.  When mapped to bottom-to-top the
+            # sign flips, giving ak_btop[k]*bk_btop[k+1] - ak_btop[k+1]*bk_btop[k].
+            ck = ak_jnp[:-1] * bk_jnp[1:] - ak_jnp[1:] * bk_jnp[:-1]
+
+            self.dyn_config = DynamicsConfig(
+                ak=ak_jnp,
+                bk=bk_jnp,
+                ck=ck,
+                dbk=dbk,
+                rk=get_constant("gas_constant_of_dry_air", "J kg^-1 K^-1")
+                / get_constant(
+                    "heat_capacity_of_dry_air_at_constant_pressure", "J kg^-1 K^-1"
+                ),
+                toa_pressure=get_constant("top_of_model_pressure", "Pa"),
+                radius=get_constant("planetary_radius", "m"),
+                omega=get_constant("planetary_rotation_rate", "s^-1"),
+                g=get_constant("gravitational_acceleration", "m s^-2"),
+                rd=get_constant("gas_constant_of_dry_air", "J kg^-1 K^-1"),
+                rv=get_constant("gas_constant_of_vapor_phase", "J kg^-1 K^-1"),
+                cp=get_constant(
+                    "heat_capacity_of_dry_air_at_constant_pressure", "J kg^-1 K^-1"
+                ),
+                cvap=get_constant("heat_capacity_of_vapor_phase", "J kg^-1 K^-1"),
+            )
+
+        if self.trans_config is None:
+            # For GL sampling: n_lat = L, n_lon = 2*L - 1.
+            # climt provides the grid we asked for, so arrays already
+            # arrive at the native s2fft size — no resampling needed.
+            L = n_lat
+            self.trans_config = TransformConfig(
+                L=L, sampling="gl", radius=self.dyn_config.radius
+            )
+            # Build precompute transform kernels eagerly — kernel
+            # construction is not jit-traceable.
+            from .jax.transforms import prebuild_kernels
+
+            prebuild_kernels(L, "gl")
+
+        if self.stepper_config is None:
+            # Build a temporary default config to read the canonical IMEX
+            # coefficients (aa22, aa33, bb4) so the precomputed d_hyb_m
+            # matrices stay consistent with whatever StepperConfig uses.
+            _default_sc = StepperConfig(dt=dt)
+            # Compute semi-implicit matrices (mirrors Fortran init_semimpdata),
+            # passing coefficients explicitly to avoid hardcoding them.
+            si_matrices = init_semi_implicit_matrices(
+                self.dyn_config,
+                self.trans_config,
+                dt,
+                aa22=_default_sc.aa22,
+                aa33=_default_sc.aa33,
+                bb4=_default_sc.bb4,
+            )
+            # Compute hyper-diffusion and Rayleigh damping operators
+            diff_ops = init_diffusion_operators(self.dyn_config, self.trans_config, dt)
+            self.stepper_config = StepperConfig(
+                dt=dt,
+                explicit=False,
+                amhyb=si_matrices["amhyb"],
+                bmhyb=si_matrices["bmhyb"],
+                tor_hyb=si_matrices["tor_hyb"],
+                svhyb=si_matrices["svhyb"],
+                d_hyb_m=si_matrices["d_hyb_m"],
+                disspec=diff_ops["disspec"],
+                diff_prof=diff_ops["diff_prof"],
+                dmp_prof=diff_ops["dmp_prof"],
+            )
+
+        L = self.trans_config.L
+
+        # On the very first call, convert grid initial conditions to spectral
+        # space.  On subsequent calls, reuse the cached spectral state so we
+        # never do the lossy grid→spectral round-trip again.
+        if self._spec_state is None:
+            grid_orig = GridState(
+                u=u,
+                v=v,
+                temperature=temp,
+                vorticity=jnp.zeros_like(u),
+                divergence=jnp.zeros_like(u),
+                log_surface_pressure=jnp.log(ps),
+                tracers=jnp.stack([q], axis=0),
+            )
+            spec_orig = grid_to_spectral(grid_orig, self.trans_config)
+        else:
+            spec_orig = self._spec_state
+
+        # Compute phis gradients on the native grid (once, since topography is static)
+        if self._phis_grads is None:
+            sampling = self.trans_config.sampling
+            radius = self.dyn_config.radius
+            phis_lm = s2_forward(phis, L, sampling)
+            l_arr = jnp.arange(L)
+            l_factor = jnp.sqrt(l_arr * (l_arr + 1))
+            F1_phis_lm = -l_factor[:, None] * phis_lm
+            f_phis_spin1 = s2_inverse(F1_phis_lm, L, sampling, spin=1)
+            dphisdx = f_phis_spin1.imag / radius
+            dphisdy = -f_phis_spin1.real / radius
+            self._phis_grads = (dphisdx, dphisdy)
+
+        # Gaussian quadrature latitudes matching s2fft GL sampling
+        if self._latitudes is None:
+            self._latitudes = get_gaussian_latitudes(L)
+
+        # Gaussian quadrature weights and initial dry surface pressure — only
+        # needed by the dry-mass fixer. Skip for adiabatic runs (matches
+        # Fortran run.f90 line 330: `if (.not. adiabatic) then`).
+        if not self.adiabatic:
+            if self._gauss_weights is None:
+                _, raw_weights = np.polynomial.legendre.leggauss(L)
+                # leggauss returns weights summing to 2; normalise to sum to 1.
+                self._gauss_weights = jnp.array(raw_weights / 2.0)
+
+            if self._pdryini is None:
+                from .jax.dynamics import compute_pressure_diagnostics
+
+                lnps_grid = jnp.log(ps)
+                press_diag_init = compute_pressure_diagnostics(lnps_grid, self.dyn_config)
+                q_init = jnp.array(q)  # (n_lev, n_lat, n_lon)
+                g = self.dyn_config.g
+                pwat_init = (
+                    jnp.sum(q_init * press_diag_init.dp, axis=0) / g
+                )  # (n_lat, n_lon)
+                w = self._gauss_weights[:, None]  # (n_lat, 1)
+                pmean_init = float(jnp.sum(w * ps) / n_lon)
+                pwat_global_init = float(jnp.sum(w * pwat_init) / n_lon)
+                self._pdryini = pmean_init - g * pwat_global_init
+
+        # Advance one timestep (dry-mass fixer activated via gauss_weights +
+        # pdryini when adiabatic=False, matching Fortran run.f90 lines 349-356).
+        spec_final = self._jit_advance(
+            spec_orig,
+            self._phis_grads,
+            self.dyn_config,
+            self.trans_config,
+            self.stepper_config,
+            self._latitudes,
+            self._gauss_weights,
+            self._pdryini,
+        )
+
+        # Time-split physics adjustment (Held-Suarez etc.), matching the
+        # Fortran wrapper's assign_tendencies + run.f90 physics block.
+        if self._phys_tendencies is not None:
+            spec_final = self._apply_physics_tendencies(spec_final, dt)
+
+        # Cache the spectral state for the next call so we never re-do
+        # grid→spectral (which would accumulate truncation error).
+        self._spec_state = spec_final
+
+        grid_final, _ = spectral_to_grid(spec_final, self.trans_config)
+
+        def to_numpy(arr):
+            if jnp.iscomplexobj(arr):
+                arr = arr.real
+            return jax.device_get(arr)
+
+        return {}, {
+            "air_temperature": to_numpy(grid_final.temperature),
+            "eastward_wind": to_numpy(grid_final.u),
+            "northward_wind": to_numpy(grid_final.v),
+            "surface_air_pressure": to_numpy(jnp.exp(grid_final.log_surface_pressure)),
+            "specific_humidity": to_numpy(grid_final.tracers[0]),
+        }

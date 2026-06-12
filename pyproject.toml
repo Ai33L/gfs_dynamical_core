@@ -29,6 +29,10 @@ dependencies = [
     "cython>=0.25",
     "scipy>=0.18.1",
     "climt>=0.18.4",
+    "jax==0.5.3",
+    "jaxlib==0.5.3",
+    "s2fft==1.3.0",
+    "flax==0.10.6",
 ]
 
 [project.optional-dependencies]

@@ -88,7 +88,7 @@ use iso_c_binding, only: c_double,c_int,c_bool
  ! explicit=.true. means use explicit time differencing
  ! if .false., semi-implicit or additive RK (Ascher, Spiteri and Ruth 1997
  ! DOI:10.1016/S0168-9274(97)00056-1) is used.
- logical    :: explicit = .false. ! use semi-implicit RK
+ logical    :: explicit = .true. ! use semi-implicit RK
  ! starting forecast time in seconds (read in from initfile)
  real(r_kind) :: tstart
  integer    :: idate_start(4) ! starting date (hr,month,day,year)

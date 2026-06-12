@@ -293,6 +293,8 @@ end subroutine gfs_uv_to_vrtdiv
                     prsgx,prsgy,&
                     vadvu,vadvv,vadvt,vadvq) ! work storage
 
+   ! --- END DEBUG ---
+
    ! get vertical advection terms  (input etadot is top to bottom)
    call getvadv(ug,etadot,vadvu)
    call getvadv(vg,etadot,vadvv)
@@ -744,5 +746,6 @@ end subroutine gfs_uv_to_vrtdiv
       call grdtospec(dpsdt,workspec)
       dlnpsspecdt = (workspec - lnpsspec)/dtx
   end subroutine dry_mass_fixer
+
 
 end module dyn_run
