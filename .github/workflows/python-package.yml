@@ -33,6 +33,9 @@ jobs:
         run: |
           # stop the build if there are Python syntax errors or undefined names
           flake8 --ignore=E501,E226,W503,W504,W605 gfs_dynamical_core/ --count --show-source --statistics
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: brew install libomp gcc
       - name: Build gfs
         run: |
           TOX_ENV=py$(echo ${{ matrix.python-version }} | tr -d '.')
@@ -40,8 +43,12 @@ jobs:
             gfortran --version
             CLIMT_ARCH=Linux tox -e $TOX_ENV
           elif [ "$RUNNER_OS" == "macOS" ]; then
-            # which gcc #/usr/bin/gcc
-            # which gfortran
+            GCC=$(ls /opt/homebrew/bin/gcc-* | sort -V | tail -1)
+            export CC=$GCC
+            export FC=$(ls /opt/homebrew/bin/gfortran-* | sort -V | tail -1)
+            export F77=$FC
+            $CC --version
+            $FC --version
             CLIMT_ARCH=Darwin tox -e $TOX_ENV
           else
             echo "$RUNNER_OS not supported"
