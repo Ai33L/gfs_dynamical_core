@@ -52,10 +52,16 @@ jobs:
         if: failure() && runner.os == 'macOS'
         run: |
           LOG=gfs_dynamical_core/_lib/fftw-3.3.6-pl2/log.config.fftw
+          CLOG=gfs_dynamical_core/_lib/fftw-3.3.6-pl2/config.log
           if [ -f "$LOG" ]; then
             echo "=== last 100 lines of $LOG ==="
-            tail -100 config.log
             tail -100 "$LOG"
           else
             echo "$LOG not found"
+          fi
+          if [ -f "$CLOG" ]; then
+            echo "=== last 100 lines of $LOG ==="
+            tail -100 "$CLOG"
+          else
+            echo "$CLOG not found"
           fi
