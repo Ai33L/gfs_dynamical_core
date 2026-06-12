@@ -43,9 +43,10 @@ jobs:
             gfortran --version
             CLIMT_ARCH=Linux tox -e $TOX_ENV
           elif [ "$RUNNER_OS" == "macOS" ]; then
-            GCC=$(ls /opt/homebrew/bin/gcc-* | sort -V | tail -1)
-            export CC=$GCC
-            export FC=$(ls /opt/homebrew/bin/gfortran-* | sort -V | tail -1)
+            # Match only versioned binaries (gcc-14), not the gcc-ar /
+            # gcc-nm / gcc-ranlib wrapper scripts Homebrew also installs.
+            export CC=$(ls /opt/homebrew/bin/gcc-[0-9]* | sort -V | tail -1)
+            export FC=$(ls /opt/homebrew/bin/gfortran-[0-9]* | sort -V | tail -1)
             export F77=$FC
             $CC --version
             $FC --version
