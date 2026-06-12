@@ -25,10 +25,10 @@ Two differences from the 2014 paper, both deliberate:
    *different* model, not a pixel match.
 
 2. **Method.** Instead of time-integrating to a steady state (paper: day 99), we
-   find the steady eddy response **directly** by solving the linearized
-   steady-state equation with a matrix-free linear solver. The differentiability
-   of the JAX core makes the tangent-linear operator available for free via
-   `jax.linearize`. No time-stepping.
+   find the steady state **directly** by minimizing the full nonlinear
+   total-tendency residual `||F(X) + G(X)||^2` with a gradient-based optimizer
+   (L-BFGS), taking the gradient through the differentiable core with `jax.grad`.
+   No time-stepping, no linearization of the physics (see §3).
 
 ## 2. Physical formulation
 
@@ -199,3 +199,29 @@ Runtime target: minutes on CPU (5 linear solves at L=64).
 - Time-dependent / transient development (paper Fig 4).
 - Tuning to match observed ERA-Interim amplitudes; we aim for the qualitative
   transition and the `psi_MJO` trend.
+
+## 9. Implementation log
+
+- **2026-06-12 (numerical test):** First nonlinear runs (L=24) converge but
+  stall: `J/J0` plateaus at ~0.62 after 800 L-BFGS iters and the eddy response
+  is negligible (psi_MJO ~0.7, no quadrupole). **Diagnosis:** the objective is
+  dominated (~1e5x) by the **divergence** tendency. That residual (~1e-9 s^-2) is
+  the *background jet's gradient-wind imbalance* — `T_bg(sigma)` has no meridional
+  gradient, so `F(X_bg) != 0` and the optimizer spends its budget slowly
+  balancing the jet rather than growing the heating response. **Fix:** build a
+  gradient-wind/thermal-wind **balanced** background temperature from `U_bg` so
+  `F(X_bg) ~ 0`; then the heating (temperature residual) dominates and the
+  optimizer grows the stationary-wave response. (code-reading + numerical-test)
+- **2026-06-12 (numerical test, cont.):** Floored r0-normalised weighting fixed
+  the conditioning — rest case converges to `J/J0~1e-5`, strong jet descends
+  steadily. BUT the eddy response is a **global zonal-wavenumber-1** dipole, not
+  a heating-localized Gill/quadrupole, in BOTH rest and U=30. Confirmed NOT a
+  weak-damping free-mode artifact: persists with good convergence at tau=3 d.
+  **Interpretation:** a *deep* heating in the 3-D PE core projects strongly onto
+  the gravest (barotropic/external) vertical mode, whose deformation radius is
+  ~global, so the response delocalizes — unlike the paper's single-layer
+  shallow-water model (one baroclinic mode, deformation radius ~10-15 deg, hence
+  localized). This is the PE-vs-shallow-water mismatch (risk in S7), not a solver
+  bug. **Next decision (user):** reduce to an equivalent single active layer /
+  project heating onto one baroclinic mode / confine + damp the external mode.
+  (numerical-test)
