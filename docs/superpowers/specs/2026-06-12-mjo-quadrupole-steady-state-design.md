@@ -82,38 +82,54 @@ dT(lambda, phi, sigma) = A * exp(-((lambda - 90E)/Lx)^2 - (phi/Ly)^2) * W(sigma)
   the forcing is purely eddy and no zonal-mean response develops. This makes the
   eddy response cleanly attributable to the heating.
 
-## 3. Solver: linearized steady-state ("optimizer instead of the dycore")
+## 3. Solver: nonlinear steady-state via gradient-based optimization
 
-Write `X = X_bg + x'`. To first order in the eddy `x'`:
-
-```
-0 = F(X_bg + x') + G(X_bg + x')  ≈  [F(X_bg) + G(X_bg)]  +  L x'
-```
-
-where `L = d(F+G)/dX |_{X_bg}` is the tangent-linear operator. Because `X_bg` is
-zonally symmetric, `F(X_bg) + G(X_bg)` has only the zonal-mean heating residual,
-whose eddy part is the (zonal-mean-removed) heating `b`. So the **eddy stationary
-response** solves the linear system
+We solve the **full nonlinear** steady-state problem — no linearization. The
+steady state is where the total tendency vanishes, `F(X) + G(X) = 0`. We find it
+by minimizing the residual norm with a gradient-based optimizer, taking the
+gradient through the differentiable core with `jax.grad`:
 
 ```
-L x' = -b ,   b = forcing projected onto the temperature tendency (eddy only)
+minimize   J(theta) = ½ * sum_i  w_i * || [F(X) + G(X)]_i ||^2
+over        theta = (u, v, T, lnps)  real grid-space fields
+where       X = grid_to_spectral(theta)         # reality + truncation enforced
+            i ranges over prognostic vars (vorticity, divergence, temperature, lnps)
 ```
 
-- `L` is obtained matrix-free from `jax.linearize(total_tendency, X_bg)` — the
-  JVP closure. No explicit matrix is formed.
-- `L` is **block-diagonal in zonal wavenumber m** (linearization about a
-  zonally-symmetric state), so each `m` is independent and the `m=0` null space
-  is avoided by the eddy-only forcing.
-- The Rayleigh + Newtonian damping makes `L` non-singular on the eddy subspace
-  (this is why the paper needs drag).
-- Solve with **GMRES** (`jax.scipy.sparse.linalg.gmres`, pytree-valued, complex)
-  since `L` is non-symmetric. Fallback if convergence is poor: least-squares via
-  CG on the normal equations `L* L x' = -L* b`, or `optax`/`jaxopt` minimization
-  of `½‖L x' + b‖²` (this is the literal "optimizer" form; mathematically the
-  same minimizer).
+Design choices that make this well-posed and differentiable:
 
-The matches the paper's own linear vorticity-balance interpretation (their
-Eq. 2), so the diagnostics map directly.
+- **Optimize in real grid space** `theta = (u, v, T, lnps)`, not the complex
+  spectral state. `grid_to_spectral(theta)` (differentiable) maps to the spectral
+  state and automatically enforces the reality condition and triangular
+  truncation, so we never optimize redundant/complex DOF or leave the physical
+  manifold. Mirrors how `component_jax` builds initial conditions (u, v with
+  vorticity/divergence derived).
+- **Forcing `G`** is added to the spectral dynamics tendency: Rayleigh relaxation
+  `-(vort - vort_bg)/tau_M`, `-(div)/tau_M`, and Newtonian
+  `-(temp - Teq)/tau_T`, with `Teq = grid_to_spectral(T_bg + dT)`.
+- **Per-variable weights `w_i`** normalize the very different tendency
+  magnitudes/units across (vorticity ~1e-10, divergence, dT/dt, dlnps/dt) so the
+  optimizer balances them rather than chasing the stiff gravity-wave components.
+  Characteristic scales from the background + forcing; a tunable knob.
+- **Initial guess** `theta_0 = (U_bg, 0, T_bg, lnps_ref)` — the background jet
+  with zero eddy. The optimizer grows the stationary-wave response that balances
+  the heating against advection + damping.
+- **Optimizer:** L-BFGS (`optax.lbfgs`, fallback `jax.scipy.optimize.minimize`
+  BFGS / Adam) on the scalar objective `J`. The problem is a nonlinear
+  least-squares, so L-BFGS converges quickly near the minimum; run to a residual
+  tolerance or a fixed large iteration budget. Damping (`tau_M`, `tau_T`)
+  guarantees the minimizer exists and is finite.
+
+The eddy response plotted in §4 is `X - zonal_mean(X)` (equivalently the
+deviation from the zonally-symmetric background). Because the heating's zonal
+mean is removed (§2), the zonal-mean state stays close to `X_bg` and the eddies
+are cleanly attributable to the heating.
+
+**Why nonlinear (vs a linear solve):** the paper reports the response is *nearly*
+linear, but solving the true nonlinear residual (a) needs no
+zonally-symmetric-background assumption, (b) captures any amplitude-dependent
+distortion of the quadrupole, and (c) is the literal "optimizer through the
+differentiable dycore" demonstration. Convergence is the main risk (§7).
 
 ## 4. Sweep & outputs
 
@@ -168,16 +184,18 @@ Runtime target: minutes on CPU (5 linear solves at L=64).
   if the upper-level transition is muddy, concentrate the jet and heating in the
   upper troposphere (closer to the paper's single upper layer) before falling
   back to a single-active-layer reduction.
-- **GMRES conditioning.** Fast gravity/Kelvin modes make `L` stiff. Mitigation:
-  the damping regularizes; if needed, increase drag slightly, precondition by the
-  diagonal, or switch to the normal-equations / optimizer fallback (§3).
-- **Background not exactly steady.** Handled by construction — eddy-only forcing
-  means the background's zonal-mean imbalance does not force eddies at linear
-  order (§2, §3).
+- **Optimizer convergence / stiffness.** Fast gravity/Kelvin modes give large,
+  stiff residual components. Mitigations: per-variable weighting `w_i` (§3),
+  good initial guess (background jet), L-BFGS with line search, and increasing
+  damping slightly if the residual plateaus. Monitor `J` and the max grid-space
+  tendency to confirm a true steady state, not just a flat optimizer.
+- **Local minima / non-convergence.** If L-BFGS stalls far from zero residual,
+  warm-start from a weaker-jet solution (continuation in `U_max`) so each solve
+  starts near its neighbour. The rest case (`U_max=0`) is the easiest and seeds
+  the sweep.
 
 ## 8. Out of scope
 
-- Nonlinear steady state (offered as a later cross-check toggle, not built now).
 - Time-dependent / transient development (paper Fig 4).
 - Tuning to match observed ERA-Interim amplitudes; we aim for the qualitative
   transition and the `psi_MJO` trend.
