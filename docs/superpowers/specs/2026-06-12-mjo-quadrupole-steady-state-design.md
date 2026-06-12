@@ -1,7 +1,7 @@
 # Reproducing the MJO upper-level quadrupole as a steady-state solve on the GFS JAX core
 
 **Date:** 2026-06-12
-**Status:** Design — awaiting review
+**Status:** Implemented & run — deep-3-D regime, reinterpreted (see §9, §10)
 **Author:** Joy Monteiro (with Claude)
 
 ## 1. Goal
@@ -225,3 +225,24 @@ Runtime target: minutes on CPU (5 linear solves at L=64).
   bug. **Next decision (user):** reduce to an equivalent single active layer /
   project heating onto one baroclinic mode / confine + damp the external mode.
   (numerical-test)
+
+## 10. Outcome (deep-3-D, reinterpreted)
+
+User decision: keep the deep 3-D setup and report the genuine PE response rather
+than reduce to a single baroclinic mode. Final converged sweep (L=32, tau=3 d,
+residuals ~1e-10, `examples/mjo_results/`):
+
+- **No compact quadrupole.** The rotational (streamfunction) response stays a
+  broad planetary-scale pair of cells that intensifies modestly with the jet but
+  never coalesces into four subtropical gyres; the upper-level geopotential is
+  dominated by a localized low over the heating plus a weak global far-field.
+- The geopotential/wind ratio *decreases* (3405 -> 2707) with jet strength — the
+  opposite of the paper's quadrupole signature (8 -> 36).
+- **Interpretation:** the quadrupole is a single-baroclinic-mode phenomenon
+  (deformation radius ~10-15 deg). Deep heating in the full 3-D core projects
+  onto the gravest/barotropic mode (near-global deformation radius), delocalizing
+  the response. Robust to damping (tau = 3 and 10 d). See
+  `examples/mjo_results/README.md`.
+
+Deliverables: `examples/mjo_quadrupole_steady_state.py`,
+`examples/mjo_results/{mjo_quadrupole_sweep.png, run.log, README.md}`.

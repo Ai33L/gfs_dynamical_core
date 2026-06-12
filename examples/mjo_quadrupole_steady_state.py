@@ -337,37 +337,49 @@ def psi_mjo_ratio(Z_eddy, u_eddy, v_eddy):
 
 
 def plot_sweep(results, lons_rad, lats_rad, sigma, lev_idx, outfile):
+    from matplotlib.patches import Ellipse
+
     lon = np.rad2deg(np.asarray(lons_rad))
     lat = np.rad2deg(np.asarray(lats_rad))
     n = len(results)
-    fig, axes = plt.subplots(n, 1, figsize=(9, 3.0 * n), squeeze=False)
-    for ax, res in zip(axes[:, 0], results):
-        Z, ue, ve = res["Z"], res["u"], res["v"]
-        m = np.max(np.abs(Z)) + 1e-30
-        levels = np.linspace(-m, m, 21)
-        c = ax.contourf(lon, lat, Z, levels=levels, cmap="RdBu_r", extend="both")
-        skl, skj = max(1, len(lon) // 24), max(1, len(lat) // 16)
-        ax.quiver(lon[::skl], lat[::skj],
-                  ue[::skj, ::skl], ve[::skj, ::skl],
-                  scale=None, width=0.002, color="k", alpha=0.6)
-        ax.axhline(30, color="g", lw=0.6, ls="--")
-        ax.axhline(-30, color="g", lw=0.6, ls="--")
-        from matplotlib.patches import Ellipse
-        ax.add_patch(Ellipse((90, 0), 2 * 30, 2 * 10, fill=False,
-                             edgecolor="turquoise", lw=1.5))
-        ax.set_ylim(-80, 80)
-        ax.set_ylabel("lat")
-        ax.set_title(
-            f"U_max = {res['U_max']:.0f} m/s   "
-            f"psi_MJO = {res['psi_mjo']:.1f}   "
-            f"(sigma~{sigma[lev_idx]:.2f})"
-        )
-        fig.colorbar(c, ax=ax, label="eddy geopotential height (m)")
-    axes[-1, 0].set_xlabel("longitude")
+    skl, skj = max(1, len(lon) // 24), max(1, len(lat) // 16)
+    fig, axes = plt.subplots(n, 2, figsize=(15, 2.7 * n), squeeze=False)
+    col_titles = ["eddy streamfunction (rotational response)",
+                  "eddy geopotential height"]
+    col_keys = ["psi", "Z"]
+    col_labels = ["streamfunction (m^2/s)", "geopotential height (m)"]
+    for row, res in enumerate(results):
+        for col, key in enumerate(col_keys):
+            ax = axes[row, col]
+            field = res[key]
+            m = np.max(np.abs(field)) + 1e-30
+            c = ax.contourf(lon, lat, field, levels=np.linspace(-m, m, 21),
+                            cmap="RdBu_r", extend="both")
+            ax.quiver(lon[::skl], lat[::skj],
+                      res["u"][::skj, ::skl], res["v"][::skj, ::skl],
+                      width=0.002, color="k", alpha=0.55)
+            ax.axhline(28, color="g", lw=0.6, ls="--")
+            ax.axhline(-28, color="g", lw=0.6, ls="--")
+            ax.add_patch(Ellipse((90, 0), 60, 20, fill=False,
+                                 edgecolor="turquoise", lw=1.5))
+            ax.set_ylim(-80, 80)
+            ax.set_ylabel("lat")
+            fig.colorbar(c, ax=ax, label=col_labels[col])
+            if row == 0:
+                ax.set_title(col_titles[col], fontsize=11)
+        axes[row, 0].text(-0.16, 0.5,
+                          f"U_max = {res['U_max']:.0f} m/s\n"
+                          f"$\\Phi$/wind = {res['psi_mjo']:.0f}",
+                          transform=axes[row, 0].transAxes, rotation=90,
+                          va="center", ha="center", fontsize=10)
+    for col in range(2):
+        axes[-1, col].set_xlabel("longitude")
     fig.suptitle(
-        "Upper-level eddy response to equatorial heating vs jet strength\n"
-        "(nonlinear steady state via L-BFGS through the GFS JAX core)",
-        y=1.005,
+        f"Upper-level (sigma~{sigma[lev_idx]:.2f}) eddy response to equatorial "
+        "heating at 90E vs subtropical jet strength\n"
+        "nonlinear steady state via L-BFGS through the GFS JAX primitive-equation "
+        "core (deep heating, full 3-D)",
+        y=1.005, fontsize=12,
     )
     fig.tight_layout()
     fig.savefig(outfile, dpi=130, bbox_inches="tight")
@@ -412,7 +424,7 @@ def main():
         objective, max_residual = make_objective(
             total_tendency, theta_bg, (vort_bg, Teq_spec, lnps_bg_spec), tauM, tauT
         )
-        theta = lbfgs_minimize(objective, theta0, maxiter=args.maxiter)
+        theta = lbfgs_minimize(objective, theta0, maxiter=args.maxiter, tol=1e-3)
 
         eddy_prev = {k: theta[k] - theta_bg[k] for k in theta_bg}
         mr = max_residual(theta)
