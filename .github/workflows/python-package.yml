@@ -54,6 +54,7 @@ jobs:
           LOG=gfs_dynamical_core/_lib/fftw-3.3.6-pl2/log.config.fftw
           if [ -f "$LOG" ]; then
             echo "=== last 100 lines of $LOG ==="
+            tail -100 config.log
             tail -100 "$LOG"
           else
             echo "$LOG not found"
