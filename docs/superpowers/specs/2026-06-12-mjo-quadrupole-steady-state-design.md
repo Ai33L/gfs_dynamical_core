@@ -44,7 +44,9 @@ G(X) = -(vort - vort_bg)/tau_M            # Rayleigh friction on rotational wind
 T_eq = T_bg(sigma) + dT(lambda, phi, sigma)   # the imposed temperature anomaly
 ```
 
-`tau_M = 20 days`, `tau_T = 10 days` (paper values).
+`tau_M = tau_T = 12 days` (realistic radiative/mechanical damping). Strong damping
+(e.g. 3 days) localizes the response near the source and suppresses the
+great-circle Rossby wavetrain, so a realistic ~10-15 day timescale is used.
 
 ### Background state `X_bg` (the jet — swept)
 
@@ -58,12 +60,11 @@ Zonally symmetric, equatorially symmetric.
   via `H0 = 0, 500, 1000, 1500, 2000 m`).
 - Background vorticity `vort_bg = -1/(a cos phi) d(U_bg cos phi)/d phi`, computed
   spectrally; `div_bg = 0`.
-- Reference temperature `T_bg(sigma)` is a function of height only (e.g. a
-  realistic tropical mean sounding or isothermal ~250 K). Because `X_bg` is
-  zonally symmetric, `F(X_bg)` is zonally symmetric and contributes **no eddy
-  forcing** — so `T_bg` need not be in exact thermal-wind balance with the jet
-  for the *eddy* problem (see §3). This is standard linear-stationary-wave
-  practice.
+- Reference temperature `T_bg(sigma)`: constant-lapse troposphere (300 K surface
+  -> 200 K at the 200 hPa tropopause), **isothermal (200 K) above 200 hPa**. The
+  stratospheric lid sets the vertical-mode structure so the heating can project
+  onto the first baroclinic mode. The jet's latitudinal temperature gradient is
+  then added in gradient-wind balance (so `F(X_bg) ~ 0`, see §9).
 
 ### Forcing (the heating — fixed)
 
@@ -74,8 +75,13 @@ dT(lambda, phi, sigma) = A * exp(-((lambda - 90E)/Lx)^2 - (phi/Ly)^2) * W(sigma)
 ```
 
 - `Lx = 30 deg`, `Ly = 10 deg`, centre `phi_p = 0` (straddles equator).
-- `W(sigma)`: deep tropospheric vertical profile peaking mid-troposphere
-  (canonical Gill/MJO heating), zero at top and surface.
+- `W(sigma)`: **first-baroclinic-mode** structure — half-sine in log-pressure
+  confined to the troposphere (zero at the surface and at 200 hPa, zero in the
+  stratosphere, peak ~450 hPa). Projects onto mode 1 rather than leaking onto the
+  barotropic mode (which an all-positive deep profile does), so the response is
+  baroclinic at the source. The off-equatorial flanking-Rossby/quadrupole
+  response is then *expected* to be barotropic (observed in the 2014 paper) — so
+  the barotropic mode is NOT damped.
 - `A`: a few K — small enough to stay in the linear regime (paper shows the
   response is essentially linear in heating amplitude).
 - **Zonal mean removed:** following the paper, subtract the zonal mean of `dT` so

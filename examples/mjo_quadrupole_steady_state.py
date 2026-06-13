@@ -109,9 +109,33 @@ def jet_profile(lats_rad, sigma):
     return V * J                                 # (n_lev, n_lat), unit amplitude
 
 
+SIGMA_TROP = 0.2          # tropopause at ~200 hPa (ps ref 1000 hPa)
+T_SURF = 300.0
+T_STRAT = 200.0
+
+
 def reference_column(sigma):
-    """Statically-stable reference sounding T_base(sigma): 300 K surface -> 250 K top."""
-    return 250.0 + 50.0 * sigma                  # (n_lev,)
+    """Reference sounding: constant-lapse troposphere, ISOTHERMAL above 200 hPa.
+
+    Linear in log-pressure from T_SURF at the surface to T_STRAT at the 200 hPa
+    tropopause, then isothermal (T_STRAT) in the stratosphere.  The lid sets the
+    vertical-mode structure so the heating can project onto the first baroclinic
+    mode.
+    """
+    sig = jnp.asarray(sigma)
+    zt = jnp.log(sig) / np.log(SIGMA_TROP)       # 0 at surface, 1 at 200 hPa, >1 above
+    T_trop = T_SURF + (T_STRAT - T_SURF) * zt
+    return jnp.where(sig >= SIGMA_TROP, T_trop, T_STRAT)     # (n_lev,)
+
+
+def baroclinic_vertical_profile(sigma):
+    """First-baroclinic-mode heating structure: half-sine in log-pressure confined
+    to the troposphere (zero at surface and at 200 hPa, zero in the stratosphere),
+    peaking near 450 hPa.  Single hump -> projects onto the first baroclinic mode."""
+    sig = jnp.asarray(sigma)
+    zt = jnp.log(sig) / np.log(SIGMA_TROP)
+    W = jnp.sin(np.pi * zt)
+    return jnp.where(sig >= SIGMA_TROP, W, 0.0)
 
 
 def balanced_temperature(U_bg, sigma, lats_rad, dyn):
@@ -162,8 +186,7 @@ def heating_anomaly(lats_rad, lons_rad, sigma, amp=2.0,
     Ly = np.deg2rad(Ly_deg)
     dlam = jnp.arctan2(jnp.sin(lam - lon0), jnp.cos(lam - lon0))  # wrap to [-pi,pi]
     horiz = jnp.exp(-((dlam / Lx) ** 2) - ((phi / Ly) ** 2))      # (n_lat, n_lon)
-    W = jnp.sin(np.pi * (1.0 - sigma))            # deep, zero at surface & top
-    W = jnp.clip(W, 0.0)
+    W = baroclinic_vertical_profile(sigma)        # first baroclinic mode, troposphere
     dT = amp * W[:, None, None] * horiz[None, :, :]   # (n_lev, n_lat, n_lon)
     dT = dT - jnp.mean(dT, axis=2, keepdims=True)     # remove zonal mean
     return dT
@@ -173,7 +196,7 @@ def heating_anomaly(lats_rad, lons_rad, sigma, amp=2.0,
 # Tendency, forcing, objective.
 # ---------------------------------------------------------------------------
 def make_solver(dyn, trans, lats, sigma, n_lat, n_lon, n_lev,
-                tau_M_days=20.0, tau_T_days=10.0):
+                tau_M_days=12.0, tau_T_days=12.0):
     tauM = tau_M_days * DAY
     tauT = tau_T_days * DAY
     phis_grads = (jnp.zeros((n_lat, n_lon)), jnp.zeros((n_lat, n_lon)))
@@ -259,8 +282,9 @@ def make_objective(total_tendency, theta0, bg, tauM, tauT):
     return objective, max_residual
 
 
-def lbfgs_minimize(objective, theta0, maxiter=400, tol=1e-8, verbose=True):
-    opt = optax.lbfgs()
+def lbfgs_minimize(objective, theta0, maxiter=400, tol=1e-8, verbose=True,
+                   memory_size=30):
+    opt = optax.lbfgs(memory_size=memory_size)
     value_and_grad = optax.value_and_grad_from_state(objective)
 
     @jax.jit
@@ -304,8 +328,8 @@ def geopotential_height(grid, dyn):
     return phi_layer / dyn.g
 
 
-def upper_level_eddy(theta, theta_to_spec, trans, dyn, lev_idx):
-    """Eddy streamfunction, eddy geopotential height, and eddy winds at a level."""
+def compute_eddy_fields(theta, theta_to_spec, trans, dyn):
+    """Full 3-D eddy fields (streamfunction, geopotential height, u, v)."""
     spec = theta_to_spec(theta)
     L = trans.L
     R = dyn.radius
@@ -321,12 +345,12 @@ def upper_level_eddy(theta, theta_to_spec, trans, dyn, lev_idx):
     def eddy(field):
         return field - jnp.mean(field, axis=-1, keepdims=True)
 
-    return (
-        np.asarray(eddy(psi[lev_idx])),
-        np.asarray(eddy(Z[lev_idx])),
-        np.asarray(eddy(grid.u[lev_idx])),
-        np.asarray(eddy(grid.v[lev_idx])),
-    )
+    return {
+        "psi3d": np.asarray(eddy(psi)),
+        "Z3d": np.asarray(eddy(Z)),
+        "u3d": np.asarray(eddy(grid.u)),
+        "v3d": np.asarray(eddy(grid.v)),
+    }
 
 
 def psi_mjo_ratio(Z_eddy, u_eddy, v_eddy):
@@ -346,17 +370,18 @@ def plot_sweep(results, lons_rad, lats_rad, sigma, lev_idx, outfile):
     fig, axes = plt.subplots(n, 2, figsize=(15, 2.7 * n), squeeze=False)
     col_titles = ["eddy streamfunction (rotational response)",
                   "eddy geopotential height"]
-    col_keys = ["psi", "Z"]
+    col_keys = ["psi3d", "Z3d"]
     col_labels = ["streamfunction (m^2/s)", "geopotential height (m)"]
     for row, res in enumerate(results):
+        ue, ve = res["u3d"][lev_idx], res["v3d"][lev_idx]
         for col, key in enumerate(col_keys):
             ax = axes[row, col]
-            field = res[key]
+            field = res[key][lev_idx]
             m = np.max(np.abs(field)) + 1e-30
             c = ax.contourf(lon, lat, field, levels=np.linspace(-m, m, 21),
                             cmap="RdBu_r", extend="both")
             ax.quiver(lon[::skl], lat[::skj],
-                      res["u"][::skj, ::skl], res["v"][::skj, ::skl],
+                      ue[::skj, ::skl], ve[::skj, ::skl],
                       width=0.002, color="k", alpha=0.55)
             ax.axhline(28, color="g", lw=0.6, ls="--")
             ax.axhline(-28, color="g", lw=0.6, ls="--")
@@ -386,6 +411,68 @@ def plot_sweep(results, lons_rad, lats_rad, sigma, lev_idx, outfile):
     print(f"\nFigure written to {outfile}")
 
 
+def plot_vertical(results, lons_rad, lats_rad, sigma, outfile):
+    """Vertical structure: forcing/basic-state profiles + response cross-sections."""
+    lon = np.rad2deg(np.asarray(lons_rad))
+    lat = np.rad2deg(np.asarray(lats_rad))
+    sig = np.asarray(sigma)
+    p = sig * 1000.0                                  # approx pressure (hPa)
+    res = results[-1]                                 # strongest jet
+    u3d = res["u3d"]                                  # (n_lev, n_lat, n_lon)
+    jeq = int(np.argmin(np.abs(lat)))                 # equator row
+    ilon90 = int(np.argmin(np.abs(lon - 90.0)))       # heating longitude
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
+
+    # (a) forcing + basic-state vertical profiles
+    ax = axes[0]
+    W = np.asarray(baroclinic_vertical_profile(sig))
+    Tb = np.asarray(reference_column(sig))
+    ax.plot(W / (np.max(np.abs(W)) + 1e-30), p, "r-o", ms=3, label="heating (mode 1)")
+    ax.invert_yaxis()
+    ax.set_ylabel("pressure (hPa)")
+    ax.set_xlabel("normalized heating")
+    ax.axhline(200, color="grey", ls="--", lw=0.8)
+    ax.set_title("(a) first-baroclinic heating &\nbasic-state T")
+    axT = ax.twiny()
+    axT.plot(Tb, p, "b-s", ms=3, label="T_base")
+    axT.set_xlabel("T_base (K)", color="b")
+    axT.tick_params(axis="x", colors="b")
+    ax.legend(loc="lower right", fontsize=8)
+
+    # (b) equatorial longitude-pressure section of eddy u
+    ax = axes[1]
+    sec = u3d[:, jeq, :]
+    m = np.max(np.abs(sec)) + 1e-30
+    c = ax.contourf(lon, p, sec, levels=np.linspace(-m, m, 21), cmap="RdBu_r",
+                    extend="both")
+    ax.invert_yaxis()
+    ax.axhline(200, color="grey", ls="--", lw=0.8)
+    ax.axvline(90, color="turquoise", lw=1.2)
+    ax.set_xlabel("longitude")
+    ax.set_ylabel("pressure (hPa)")
+    ax.set_title(f"(b) eddy u at equator  (U_max={res['U_max']:.0f} m/s)\n"
+                 "baroclinic = sign reversal with height")
+    fig.colorbar(c, ax=ax, label="eddy u (m/s)")
+
+    # (c) meridional latitude-pressure section of eddy u at 90E
+    ax = axes[2]
+    sec = u3d[:, :, ilon90]
+    m = np.max(np.abs(sec)) + 1e-30
+    c = ax.contourf(lat, p, sec, levels=np.linspace(-m, m, 21), cmap="RdBu_r",
+                    extend="both")
+    ax.invert_yaxis()
+    ax.axhline(200, color="grey", ls="--", lw=0.8)
+    ax.set_xlabel("latitude")
+    ax.set_ylabel("pressure (hPa)")
+    ax.set_title(f"(c) eddy u at 90E  (U_max={res['U_max']:.0f} m/s)")
+    fig.colorbar(c, ax=ax, label="eddy u (m/s)")
+
+    fig.tight_layout()
+    fig.savefig(outfile, dpi=130, bbox_inches="tight")
+    print(f"Vertical-structure figure written to {outfile}")
+
+
 # ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
@@ -393,14 +480,22 @@ def main():
     ap.add_argument("--maxiter", type=int, default=400)
     ap.add_argument("--u-sweep", type=float, nargs="+",
                     default=[0.0, 8.0, 16.0, 24.0, 30.0])
-    ap.add_argument("--tau-m", type=float, default=20.0, help="momentum relax (days)")
-    ap.add_argument("--tau-t", type=float, default=10.0, help="thermal relax (days)")
+    ap.add_argument("--tau-m", type=float, default=12.0, help="momentum relax (days)")
+    ap.add_argument("--tau-t", type=float, default=12.0, help="thermal relax (days)")
+    ap.add_argument("--plot-sigma", type=float, default=0.25,
+                    help="sigma level for the horizontal maps (~250 hPa)")
     ap.add_argument("--out", type=str, default="mjo_quadrupole_sweep.png")
+    ap.add_argument("--replot", type=str, default=None,
+                    help="re-plot from a saved .npz without solving")
     args = ap.parse_args()
+
+    if args.replot:
+        replot(args.replot, args.out, plot_sigma=args.plot_sigma)
+        return
 
     print(f"Building config (L={args.L}) ...")
     dyn, trans, lats, lons, sigma, n_lat, n_lon, n_lev = build_config(args.L)
-    lev_idx = int(np.argmin(np.abs(np.asarray(sigma) - 0.20)))
+    lev_idx = int(np.argmin(np.abs(np.asarray(sigma) - args.plot_sigma)))
     print(f"Upper-level diagnostic at level {lev_idx} (sigma={sigma[lev_idx]:.3f})")
 
     theta_to_spec, total_tendency, tauM, tauT = make_solver(
@@ -431,16 +526,46 @@ def main():
         print(f"    max |residual|: " +
               ", ".join(f"{k}={v:.2e}" for k, v in mr.items()))
 
-        psi, Z, ue, ve = upper_level_eddy(theta, theta_to_spec, trans, dyn, lev_idx)
-        ratio = psi_mjo_ratio(Z, ue, ve)
-        results.append({"U_max": U_max, "psi": psi, "Z": Z, "u": ue, "v": ve,
-                        "psi_mjo": ratio})
+        ef = compute_eddy_fields(theta, theta_to_spec, trans, dyn)
+        ratio = psi_mjo_ratio(ef["Z3d"][lev_idx], ef["u3d"][lev_idx],
+                              ef["v3d"][lev_idx])
+        ef.update({"U_max": U_max, "psi_mjo": ratio})
+        results.append(ef)
         print(f"    psi_MJO = {ratio:.1f}")
 
     print("\n  U_max(m/s)   psi_MJO")
     for r in results:
         print(f"   {r['U_max']:6.0f}     {r['psi_mjo']:8.1f}")
+
+    # Persist solved eddy fields so plotting can be re-run without re-solving.
+    npz = args.out.replace(".png", ".npz")
+    save = {"lons": np.asarray(lons), "lats": np.asarray(lats),
+            "sigma": np.asarray(sigma), "lev_idx": lev_idx,
+            "u_sweep": np.asarray([r["U_max"] for r in results]),
+            "psi_mjo": np.asarray([r["psi_mjo"] for r in results])}
+    for key in ("psi3d", "Z3d", "u3d", "v3d"):
+        save[key] = np.stack([r[key] for r in results])
+    np.savez_compressed(npz, **save)
+    print(f"Solved fields saved to {npz}")
+
     plot_sweep(results, lons, lats, sigma, lev_idx, args.out)
+    plot_vertical(results, lons, lats, sigma, args.out.replace(".png", "_vertical.png"))
+
+
+def replot(npz_path, out, plot_sigma=None):
+    """Re-make figures from a saved .npz without re-solving."""
+    d = np.load(npz_path)
+    lons, lats, sigma = d["lons"], d["lats"], d["sigma"]
+    lev_idx = int(d["lev_idx"])
+    if plot_sigma is not None:
+        lev_idx = int(np.argmin(np.abs(np.asarray(sigma) - plot_sigma)))
+    results = []
+    for i, U in enumerate(d["u_sweep"]):
+        results.append({"U_max": float(U), "psi_mjo": float(d["psi_mjo"][i]),
+                        "psi3d": d["psi3d"][i], "Z3d": d["Z3d"][i],
+                        "u3d": d["u3d"][i], "v3d": d["v3d"][i]})
+    plot_sweep(results, lons, lats, sigma, lev_idx, out)
+    plot_vertical(results, lons, lats, sigma, out.replace(".png", "_vertical.png"))
 
 
 if __name__ == "__main__":
