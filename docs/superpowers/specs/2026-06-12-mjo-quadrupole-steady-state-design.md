@@ -252,3 +252,32 @@ residuals ~1e-10, `examples/mjo_results/`):
 
 Deliverables: `examples/mjo_quadrupole_steady_state.py`,
 `examples/mjo_results/{mjo_quadrupole_sweep.png, run.log, README.md}`.
+
+## 11. Tangent-linear solve (spec 3A) and linear-vs-nonlinear comparison
+
+Added `linearized_response()`: the tangent-linear operator `tlm = dF/dX|_{X0}`
+from `jax.linearize`, solving the square Newton system `tlm . x = -F(X0)` with
+GMRES (`--compare` runs it alongside the nonlinear L-BFGS solve). Two essentials:
+
+- **Square spectral form.** `total_tendency_spec` maps the spectral state
+  (vort, div, temp, lnps; tracers excluded to avoid a null space) to the same
+  pytree, so the Jacobian is square and invertible.
+- **Jacobi nondimensional preconditioning.** The raw operator's condition number
+  is ~1e6 (gravity-wave fast manifold vs slow Rossby modes) and GMRES stagnated
+  (rel. residual ~1.8). Scaling each variable block by a characteristic eddy
+  magnitude (`_VAR_SCALE`) balances the blocks and GMRES converges to ~1e-3.
+
+**Result (L=32, tau=12 d):** the linear ψ_MJO rises with the jet
+**8.4 -> 9.2 -> 13.4 -> 14.3 -> 14.3** (rest value ~ the paper's 8; increase is
+the paper's signature), and the response concentrates near the heating and tilts
+into subtropical lobes as the jet strengthens. The nonlinear L-BFGS solve is
+*under-converged* (J/J0 ~ 0.10 after 4000 iters) and stuck on a broad planetary
+dipole, so `||nl-lin||/||lin|| ~ 0.9-1.8` reflects the **optimizer's convergence
+failure, not genuine nonlinearity**. Conclusion: for this weakly-damped, nearly
+linear stationary-wave problem the tangent-linear GMRES solve is the correct and
+efficient tool (consistent with the paper's linear interpretation); first-order
+nonlinear residual minimization is impractically slow because the weakly-damped
+Rossby modes make the least-squares ill-conditioned. A faster nonlinear path
+would be Gauss-Newton/LM (re-linearize + the same preconditioned solve per step).
+
+Deliverable: `examples/mjo_results/mjo_quadrupole_sweep_compare.png`.

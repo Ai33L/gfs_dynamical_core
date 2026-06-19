@@ -37,7 +37,7 @@ from sympl import get_constant, set_constant
 import climt  # noqa: F401  (registers constants / grid helpers)
 from gfs_dynamical_core.component_jax import GFSDynamicsJAX
 from gfs_dynamical_core.jax.dynamics import DynamicsConfig, get_spectral_tendencies
-from gfs_dynamical_core.jax.states import GridState
+from gfs_dynamical_core.jax.states import GridState, SpectralState
 from gfs_dynamical_core.jax.transforms import (
     TransformConfig,
     get_gaussian_latitudes,
@@ -225,7 +225,26 @@ def make_solver(dyn, trans, lats, sigma, n_lat, n_lon, n_lev,
             "lnps": dyn_t.d_log_surface_pressure_d_t + gl,
         }
 
-    return theta_to_spec, total_tendency, tauM, tauT
+    tracers0_spec = jnp.zeros((1, n_lev, trans.L, 2 * trans.L - 1), dtype=complex)
+
+    def dict_to_spec(s):
+        return SpectralState(
+            vorticity=s["vort"], divergence=s["div"], temperature=s["temp"],
+            log_surface_pressure=s["lnps"], tracers=tracers0_spec,
+        )
+
+    def total_tendency_spec(s, vort_bg, Teq_spec, lnps_bg_spec):
+        """Square (state -> tendency, same pytree) form for the linearized solve."""
+        spec = dict_to_spec(s)
+        dyn_t = get_spectral_tendencies(spec, phis_grads, dyn, trans, lats)
+        return {
+            "vort": dyn_t.d_vorticity_d_t - (s["vort"] - vort_bg) / tauM,
+            "div": dyn_t.d_divergence_d_t - (s["div"]) / tauM,
+            "temp": dyn_t.d_temperature_d_t - (s["temp"] - Teq_spec) / tauT,
+            "lnps": dyn_t.d_log_surface_pressure_d_t - (s["lnps"] - lnps_bg_spec) / tauT,
+        }
+
+    return theta_to_spec, total_tendency, total_tendency_spec, dict_to_spec, tauM, tauT
 
 
 def build_background(U_max, dyn, trans, lats, sigma, n_lat, n_lon, n_lev,
@@ -310,6 +329,49 @@ def lbfgs_minimize(objective, theta0, maxiter=400, tol=1e-8, verbose=True,
     return theta
 
 
+def _pnorm(tree):
+    leaves = jax.tree_util.tree_leaves(tree)
+    return float(jnp.sqrt(sum(jnp.sum(jnp.abs(a) ** 2) for a in leaves)))
+
+
+# Characteristic eddy magnitudes per variable (for Jacobi-style nondimensional
+# preconditioning of the tangent-linear system — without it the gravity-wave
+# fast manifold makes the operator condition number ~1e6 and GMRES stagnates).
+_VAR_SCALE = {"vort": 1e-5, "div": 1e-5, "temp": 1.0, "lnps": 1e-2}
+
+
+def linearized_response(F_spec, X0, restart=150, maxiter=60, tol=1e-8, verbose=True):
+    """Steady eddy response from the TANGENT-LINEAR model about X0 (spec 3A).
+
+    `tlm = dF/dX|_{X0}` comes for free from `jax.linearize`; we solve the square
+    Newton system `tlm . x = -F(X0)` matrix-free with GMRES.  The system is
+    nondimensionalized per variable (right scaling S, left scaling 1/S) so the
+    fast (gravity-wave) and slow (Rossby) blocks are balanced — essential for
+    Krylov convergence.  No physics linearization is hand-coded; `tlm` is exact
+    JAX autodiff.  Returns X_steady = X0 + x.
+    """
+    y0, tlm = jax.linearize(F_spec, X0)          # y0 = F(X0); tlm(dx) = J @ dx
+    S = _VAR_SCALE
+
+    def Jt(y):                                    # scaled operator: (1/S) J (S y)
+        Sy = {k: y[k] * S[k] for k in y}
+        t = tlm(Sy)
+        return {k: t[k] / S[k] for k in t}
+
+    rhs = {k: -y0[k] / S[k] for k in y0}         # (1/S) (-F(X0))
+    y, _ = jax.scipy.sparse.linalg.gmres(
+        Jt, rhs, tol=tol, atol=0.0, restart=restart, maxiter=maxiter,
+        solve_method="batched",
+    )
+    rel = _pnorm(jax.tree_util.tree_map(lambda a, c: a - c, Jt(y), rhs)) / (
+        _pnorm(rhs) + 1e-300)
+    if verbose:
+        print(f"    GMRES relative residual = {rel:.3e}")
+    x = {k: y[k] * S[k] for k in y}
+    X_steady = jax.tree_util.tree_map(lambda a, c: a + c, X0, x)
+    return X_steady, rel
+
+
 # ---------------------------------------------------------------------------
 # Diagnostics.
 # ---------------------------------------------------------------------------
@@ -328,9 +390,9 @@ def geopotential_height(grid, dyn):
     return phi_layer / dyn.g
 
 
-def compute_eddy_fields(theta, theta_to_spec, trans, dyn):
-    """Full 3-D eddy fields (streamfunction, geopotential height, u, v)."""
-    spec = theta_to_spec(theta)
+def eddy_fields_from_spec(spec, trans, dyn):
+    """Full 3-D eddy fields (streamfunction, geopotential height, u, v) from a
+    SpectralState — shared by the nonlinear (theta) and linear (gmres) solvers."""
     L = trans.L
     R = dyn.radius
     l_arr = jnp.arange(L)
@@ -351,6 +413,11 @@ def compute_eddy_fields(theta, theta_to_spec, trans, dyn):
         "u3d": np.asarray(eddy(grid.u)),
         "v3d": np.asarray(eddy(grid.v)),
     }
+
+
+def compute_eddy_fields(theta, theta_to_spec, trans, dyn):
+    """Full 3-D eddy fields from the nonlinear (grid theta) solution."""
+    return eddy_fields_from_spec(theta_to_spec(theta), trans, dyn)
 
 
 def psi_mjo_ratio(Z_eddy, u_eddy, v_eddy):
@@ -473,6 +540,118 @@ def plot_vertical(results, lons_rad, lats_rad, sigma, outfile):
     print(f"Vertical-structure figure written to {outfile}")
 
 
+def plot_compare(res_lin, res_nl, lons_rad, lats_rad, sigma, lev_idx, outfile):
+    """Side-by-side eddy streamfunction: linear (TLM/GMRES) vs nonlinear (L-BFGS)."""
+    from matplotlib.patches import Ellipse
+
+    lon = np.rad2deg(np.asarray(lons_rad))
+    lat = np.rad2deg(np.asarray(lats_rad))
+    n = len(res_lin)
+    skl, skj = max(1, len(lon) // 24), max(1, len(lat) // 16)
+    fig, axes = plt.subplots(n, 2, figsize=(15, 2.7 * n), squeeze=False)
+    cols = [("linearized (tangent-linear + GMRES)", res_lin),
+            ("nonlinear (L-BFGS residual min)", res_nl)]
+    for row in range(n):
+        for col, (title, res) in enumerate(cols):
+            ax = axes[row, col]
+            r = res[row]
+            psi = r["psi3d"][lev_idx]
+            m = np.max(np.abs(psi)) + 1e-30
+            c = ax.contourf(lon, lat, psi, levels=np.linspace(-m, m, 21),
+                            cmap="RdBu_r", extend="both")
+            ax.quiver(lon[::skl], lat[::skj],
+                      r["u3d"][lev_idx][::skj, ::skl],
+                      r["v3d"][lev_idx][::skj, ::skl],
+                      width=0.002, color="k", alpha=0.55)
+            ax.axhline(28, color="g", lw=0.6, ls="--")
+            ax.axhline(-28, color="g", lw=0.6, ls="--")
+            ax.add_patch(Ellipse((90, 0), 60, 20, fill=False,
+                                 edgecolor="turquoise", lw=1.5))
+            ax.set_ylim(-80, 80)
+            ax.set_ylabel("lat")
+            fig.colorbar(c, ax=ax, label="streamfunction (m^2/s)")
+            if row == 0:
+                ax.set_title(title, fontsize=11)
+        # relative L2 difference of the streamfunction between the two solutions
+        a, b = res_lin[row]["psi3d"], res_nl[row]["psi3d"]
+        reldiff = np.linalg.norm(a - b) / (np.linalg.norm(a) + 1e-30)
+        axes[row, 0].text(-0.17, 0.5,
+                          f"U_max = {res_lin[row]['U_max']:.0f} m/s\n"
+                          f"||nl-lin||/||lin|| = {reldiff:.2f}",
+                          transform=axes[row, 0].transAxes, rotation=90,
+                          va="center", ha="center", fontsize=9)
+    for col in range(2):
+        axes[-1, col].set_xlabel("longitude")
+    fig.suptitle(
+        f"Linear vs nonlinear steady eddy streamfunction (sigma~{sigma[lev_idx]:.2f}) "
+        "— same heating, jet, damping\n"
+        "tangent-linear GMRES solve about the background vs full nonlinear L-BFGS, "
+        "GFS JAX core",
+        y=1.005, fontsize=12,
+    )
+    fig.tight_layout()
+    fig.savefig(outfile, dpi=130, bbox_inches="tight")
+    print(f"\nComparison figure written to {outfile}")
+
+
+def compare_linear_nonlinear(args, dyn, trans, lats, lons, sigma, n_lat, n_lon,
+                             n_lev, lev_idx, theta_to_spec, total_tendency,
+                             total_tendency_spec, dict_to_spec, tauM, tauT):
+    """Solve both the tangent-linear (GMRES, 3A) and nonlinear (L-BFGS) steady
+    states for each jet and compare."""
+    res_lin, res_nl = [], []
+    eddy_prev = None
+    for U_max in args.u_sweep:
+        print(f"\n=== U_max = {U_max:.0f} m/s ===")
+        theta_bg, vort_bg, Teq_spec, lnps_bg_spec = build_background(
+            U_max, dyn, trans, lats, sigma, n_lat, n_lon, n_lev, theta_to_spec
+        )
+
+        # ---- linearized (tangent-linear about the background) : F_spec(X)=0 ----
+        spec_bg = theta_to_spec(theta_bg)
+        X0 = {"vort": spec_bg.vorticity, "div": spec_bg.divergence,
+              "temp": spec_bg.temperature, "lnps": spec_bg.log_surface_pressure}
+        F_spec = lambda s: total_tendency_spec(s, vort_bg, Teq_spec, lnps_bg_spec)
+        print("  [linear] tangent-linear GMRES solve ...")
+        X_lin, _ = linearized_response(F_spec, X0)
+        ef_lin = eddy_fields_from_spec(dict_to_spec(X_lin), trans, dyn)
+        ef_lin["U_max"] = U_max
+        ef_lin["psi_mjo"] = psi_mjo_ratio(ef_lin["Z3d"][lev_idx],
+                                          ef_lin["u3d"][lev_idx],
+                                          ef_lin["v3d"][lev_idx])
+        res_lin.append(ef_lin)
+
+        # ---- nonlinear (full residual minimization) ----
+        print("  [nonlinear] L-BFGS residual minimization ...")
+        theta0 = theta_bg if eddy_prev is None else {
+            k: theta_bg[k] + eddy_prev[k] for k in theta_bg}
+        objective, _ = make_objective(
+            total_tendency, theta_bg, (vort_bg, Teq_spec, lnps_bg_spec), tauM, tauT)
+        theta = lbfgs_minimize(objective, theta0, maxiter=args.maxiter, tol=1e-3)
+        eddy_prev = {k: theta[k] - theta_bg[k] for k in theta_bg}
+        ef_nl = compute_eddy_fields(theta, theta_to_spec, trans, dyn)
+        ef_nl["U_max"] = U_max
+        ef_nl["psi_mjo"] = psi_mjo_ratio(ef_nl["Z3d"][lev_idx],
+                                         ef_nl["u3d"][lev_idx],
+                                         ef_nl["v3d"][lev_idx])
+        res_nl.append(ef_nl)
+
+        reldiff = np.linalg.norm(ef_lin["psi3d"] - ef_nl["psi3d"]) / (
+            np.linalg.norm(ef_lin["psi3d"]) + 1e-30)
+        print(f"    psi_MJO  linear={ef_lin['psi_mjo']:.1f}  "
+              f"nonlinear={ef_nl['psi_mjo']:.1f}   ||nl-lin||/||lin||={reldiff:.3f}")
+
+    print("\n  U_max   psi_MJO(lin)  psi_MJO(nl)   reldiff")
+    for rl, rn in zip(res_lin, res_nl):
+        rd = np.linalg.norm(rl["psi3d"] - rn["psi3d"]) / (
+            np.linalg.norm(rl["psi3d"]) + 1e-30)
+        print(f"  {rl['U_max']:5.0f}   {rl['psi_mjo']:10.1f}  "
+              f"{rn['psi_mjo']:10.1f}   {rd:7.3f}")
+
+    out = args.out.replace(".png", "_compare.png")
+    plot_compare(res_lin, res_nl, lons, lats, sigma, lev_idx, out)
+
+
 # ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
@@ -487,6 +666,9 @@ def main():
     ap.add_argument("--out", type=str, default="mjo_quadrupole_sweep.png")
     ap.add_argument("--replot", type=str, default=None,
                     help="re-plot from a saved .npz without solving")
+    ap.add_argument("--compare", action="store_true",
+                    help="also solve the linearized (TLM/GMRES) response and "
+                         "compare with the nonlinear one")
     args = ap.parse_args()
 
     if args.replot:
@@ -498,10 +680,18 @@ def main():
     lev_idx = int(np.argmin(np.abs(np.asarray(sigma) - args.plot_sigma)))
     print(f"Upper-level diagnostic at level {lev_idx} (sigma={sigma[lev_idx]:.3f})")
 
-    theta_to_spec, total_tendency, tauM, tauT = make_solver(
-        dyn, trans, lats, sigma, n_lat, n_lon, n_lev,
-        tau_M_days=args.tau_m, tau_T_days=args.tau_t,
+    theta_to_spec, total_tendency, total_tendency_spec, dict_to_spec, tauM, tauT = (
+        make_solver(dyn, trans, lats, sigma, n_lat, n_lon, n_lev,
+                    tau_M_days=args.tau_m, tau_T_days=args.tau_t)
     )
+
+    if args.compare:
+        compare_linear_nonlinear(
+            args, dyn, trans, lats, lons, sigma, n_lat, n_lon, n_lev, lev_idx,
+            theta_to_spec, total_tendency, total_tendency_spec, dict_to_spec,
+            tauM, tauT,
+        )
+        return
 
     results = []
     eddy_prev = None
