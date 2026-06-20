@@ -99,13 +99,24 @@ def build_config(L, n_lev=20):
 # ---------------------------------------------------------------------------
 # Background jet, reference temperature, and heating anomaly.
 # ---------------------------------------------------------------------------
-def jet_profile(lats_rad, sigma):
-    """Zonally + equatorially symmetric westerly jet, peak ~30 deg, upper-trop."""
+def jet_profile(lats_rad, sigma, eq_westerly=0.0):
+    """Zonally + equatorially symmetric westerly jet, peak ~30 deg, upper-trop.
+
+    `eq_westerly` (0..1) blends in a broad cos^2(phi) component (the paper's
+    1-(sin phi)^2 family) so the wind is westerly *at the equator* as well as in
+    the subtropical jet.  Paper (Monteiro et al. 2014) notes finite equatorial
+    westerlies are necessary for the equatorial Matsuno-Gill response to break
+    out of the equatorial waveguide into the subtropics.  eq_westerly=0 recovers
+    the pure subtropical Gaussian jet (near-zero equatorial wind).
+    """
     phi = lats_rad[None, :]                      # (1, n_lat) radians
     phi_jet = np.deg2rad(30.0)
     width = np.deg2rad(15.0)
-    J = jnp.exp(-(((jnp.abs(phi) - phi_jet) / width) ** 2))   # (1, n_lat)
-    V = jnp.exp(-(((sigma[:, None] - 0.20) / 0.12) ** 2))     # (n_lev, 1)
+    bump = jnp.exp(-(((jnp.abs(phi) - phi_jet) / width) ** 2))   # subtropical jet
+    base = jnp.cos(phi) ** 2                                     # westerly at equator
+    J = (1.0 - eq_westerly) * bump + eq_westerly * base
+    J = J / (jnp.max(J) + 1e-30)                                 # normalize peak to 1
+    V = jnp.exp(-(((sigma[:, None] - 0.20) / 0.12) ** 2))        # (n_lev, 1)
     return V * J                                 # (n_lev, n_lat), unit amplitude
 
 
@@ -248,9 +259,9 @@ def make_solver(dyn, trans, lats, sigma, n_lat, n_lon, n_lev,
 
 
 def build_background(U_max, dyn, trans, lats, sigma, n_lat, n_lon, n_lev,
-                     theta_to_spec):
+                     theta_to_spec, eq_westerly=0.0):
     """Background spectral fields and the bare-jet theta for a given jet strength."""
-    U_bg = U_max * jet_profile(lats, sigma)                 # (n_lev, n_lat)
+    U_bg = U_max * jet_profile(lats, sigma, eq_westerly)    # (n_lev, n_lat)
     u_bg = jnp.broadcast_to(U_bg[:, :, None], (n_lev, n_lat, n_lon))
     v_bg = jnp.zeros((n_lev, n_lat, n_lon))
     # Temperature in gradient-wind balance with the jet (near-steady background).
@@ -540,6 +551,52 @@ def plot_vertical(results, lons_rad, lats_rad, sigma, outfile):
     print(f"Vertical-structure figure written to {outfile}")
 
 
+def geopotential_anomaly(resp_spec, bg_spec, trans, dyn):
+    """Absolute geopotential anomaly Phi' = g*(Z_response - Z_background),
+    full 3-D (n_lev, n_lat, n_lon), in m^2/s^2."""
+    gr, _ = spectral_to_grid(resp_spec, trans)
+    gb, _ = spectral_to_grid(bg_spec, trans)
+    return np.asarray(dyn.g * (geopotential_height(gr, dyn) -
+                               geopotential_height(gb, dyn)))
+
+
+def plot_geopotential_vertical(phi_anom, lons_rad, lats_rad, sigma, U_max, outfile):
+    """Vertical structure of the geopotential anomaly: zonal mean (lat-height) +
+    equatorial and 90E eddy cross-sections."""
+    lon = np.rad2deg(np.asarray(lons_rad))
+    lat = np.rad2deg(np.asarray(lats_rad))
+    p = np.asarray(sigma) * 1000.0
+    jeq = int(np.argmin(np.abs(lat)))
+    ilon90 = int(np.argmin(np.abs(lon - 90.0)))
+    eddy = phi_anom - phi_anom.mean(axis=-1, keepdims=True)
+
+    fig, ax = plt.subplots(1, 3, figsize=(16, 4.5))
+
+    def panel(a, x, field, xlabel, title, vline=None):
+        m = np.max(np.abs(field)) + 1e-30
+        c = a.contourf(x, p, field, levels=np.linspace(-m, m, 21),
+                       cmap="RdBu_r", extend="both")
+        a.invert_yaxis()
+        a.axhline(200, color="grey", ls="--", lw=0.8)
+        if vline is not None:
+            a.axvline(vline, color="turquoise", lw=1.2)
+        a.set_xlabel(xlabel)
+        a.set_ylabel("pressure (hPa)")
+        a.set_title(title)
+        fig.colorbar(c, ax=a, label="geopotential anomaly (m^2/s^2)")
+
+    panel(ax[0], lat, phi_anom.mean(axis=-1), "latitude",
+          f"(a) ZONAL-MEAN geopotential anomaly\n(U_max={U_max:.0f} m/s)")
+    panel(ax[1], lon, eddy[:, jeq, :], "longitude",
+          "(b) eddy geopotential anomaly at equator", vline=90)
+    panel(ax[2], lat, eddy[:, :, ilon90], "latitude",
+          "(c) eddy geopotential anomaly at 90E")
+
+    fig.tight_layout()
+    fig.savefig(outfile, dpi=130, bbox_inches="tight")
+    print(f"Geopotential vertical-structure figure written to {outfile}")
+
+
 def plot_compare(res_lin, res_nl, lons_rad, lats_rad, sigma, lev_idx, outfile):
     """Side-by-side eddy streamfunction: linear (TLM/GMRES) vs nonlinear (L-BFGS)."""
     from matplotlib.patches import Ellipse
@@ -604,7 +661,8 @@ def compare_linear_nonlinear(args, dyn, trans, lats, lons, sigma, n_lat, n_lon,
     for U_max in args.u_sweep:
         print(f"\n=== U_max = {U_max:.0f} m/s ===")
         theta_bg, vort_bg, Teq_spec, lnps_bg_spec = build_background(
-            U_max, dyn, trans, lats, sigma, n_lat, n_lon, n_lev, theta_to_spec
+            U_max, dyn, trans, lats, sigma, n_lat, n_lon, n_lev, theta_to_spec,
+            eq_westerly=args.eq_westerly,
         )
 
         # ---- linearized (tangent-linear about the background) : F_spec(X)=0 ----
@@ -669,6 +727,11 @@ def main():
     ap.add_argument("--compare", action="store_true",
                     help="also solve the linearized (TLM/GMRES) response and "
                          "compare with the nonlinear one")
+    ap.add_argument("--linear-only", action="store_true",
+                    help="solve only the fast tangent-linear (GMRES) response")
+    ap.add_argument("--eq-westerly", type=float, default=0.0,
+                    help="0..1 blend of a cos^2(phi) equatorial-westerly component "
+                         "into the jet (paper's 1-(sin phi)^2 family)")
     args = ap.parse_args()
 
     if args.replot:
@@ -693,12 +756,42 @@ def main():
         )
         return
 
+    if args.linear_only:
+        results, geop = [], []
+        for U_max in args.u_sweep:
+            print(f"\n=== U_max = {U_max:.0f} m/s  (linear) ===")
+            theta_bg, vort_bg, Teq_spec, lnps_bg_spec = build_background(
+                U_max, dyn, trans, lats, sigma, n_lat, n_lon, n_lev,
+                theta_to_spec, eq_westerly=args.eq_westerly)
+            spec_bg = theta_to_spec(theta_bg)
+            X0 = {"vort": spec_bg.vorticity, "div": spec_bg.divergence,
+                  "temp": spec_bg.temperature, "lnps": spec_bg.log_surface_pressure}
+            F_spec = lambda s: total_tendency_spec(s, vort_bg, Teq_spec, lnps_bg_spec)
+            X_lin, _ = linearized_response(F_spec, X0)
+            resp_spec = dict_to_spec(X_lin)
+            ef = eddy_fields_from_spec(resp_spec, trans, dyn)
+            ef["U_max"] = U_max
+            ef["psi_mjo"] = psi_mjo_ratio(ef["Z3d"][lev_idx], ef["u3d"][lev_idx],
+                                          ef["v3d"][lev_idx])
+            results.append(ef)
+            geop.append(geopotential_anomaly(resp_spec, spec_bg, trans, dyn))
+            print(f"    psi_MJO = {ef['psi_mjo']:.1f}")
+        print("\n  U_max(m/s)   psi_MJO")
+        for r in results:
+            print(f"   {r['U_max']:6.0f}     {r['psi_mjo']:8.1f}")
+        plot_sweep(results, lons, lats, sigma, lev_idx, args.out)
+        plot_geopotential_vertical(
+            geop[-1], lons, lats, sigma, results[-1]["U_max"],
+            args.out.replace(".png", "_geopot_vertical.png"))
+        return
+
     results = []
     eddy_prev = None
     for U_max in args.u_sweep:
         print(f"\n=== U_max = {U_max:.0f} m/s ===")
         theta_bg, vort_bg, Teq_spec, lnps_bg_spec = build_background(
-            U_max, dyn, trans, lats, sigma, n_lat, n_lon, n_lev, theta_to_spec
+            U_max, dyn, trans, lats, sigma, n_lat, n_lon, n_lev, theta_to_spec,
+            eq_westerly=args.eq_westerly,
         )
         # Warm start: carry the previous eddy onto the new background jet.
         if eddy_prev is None:
