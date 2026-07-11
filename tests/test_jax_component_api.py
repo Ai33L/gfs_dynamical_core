@@ -265,3 +265,53 @@ def test_component_path_matches_manual_tendencies():
     np.testing.assert_allclose(
         out_a["air_temperature"].values, out_b["air_temperature"].values,
         rtol=1e-6, atol=1e-6)
+
+
+def _grid_state(L=16, n_lev=10):
+    grid = climt.get_grid(nx=2 * L - 1, ny=L, nz=n_lev)
+    from gfs_dynamical_core.component_jax import GFSDynamicsJAX
+    dycore = GFSDynamicsJAX()
+    state = climt.get_default_state([dycore], grid_state=grid)
+    return dycore, state
+
+
+def test_array_call_outputs_air_pressure():
+    dycore, state = _grid_state()
+    _, out = dycore(state, timestep=timedelta(minutes=10))
+    assert "air_pressure" in out
+    assert "air_pressure_on_interface_levels" in out
+    ap = out["air_pressure"]
+    assert ap.shape[0] == state["air_temperature"].shape[0]  # mid_levels
+    assert (ap.values > 0).all()
+
+    # array_call must actually COMPUTE these from the stepped surface
+    # pressure, not merely pass the input state's stale values through
+    # __call__'s "carry over missing keys" fallback. Verify by calling
+    # array_call directly and checking the keys are present in its own
+    # return dict (independent of any state passthrough).
+    raw_state = {
+        "eastward_wind": state["eastward_wind"].transpose(
+            "mid_levels", "lat", "lon").values,
+        "northward_wind": state["northward_wind"].transpose(
+            "mid_levels", "lat", "lon").values,
+        "air_temperature": state["air_temperature"].transpose(
+            "mid_levels", "lat", "lon").values,
+        "surface_air_pressure": state["surface_air_pressure"].transpose(
+            "lat", "lon").values,
+        "surface_geopotential": state["surface_geopotential"].transpose(
+            "lat", "lon").values,
+        "a_coord": state[
+            "atmosphere_hybrid_sigma_pressure_a_coordinate_on_interface_levels"
+        ].values,
+        "b_coord": state[
+            "atmosphere_hybrid_sigma_pressure_b_coordinate_on_interface_levels"
+        ].values,
+        "tracers": state["specific_humidity"].transpose(
+            "mid_levels", "lat", "lon").values[None, ...],
+    }
+    _, raw_out = dycore.array_call(raw_state, timedelta(minutes=10))
+    assert "air_pressure" in raw_out
+    assert "air_pressure_on_interface_levels" in raw_out
+    assert raw_out["air_pressure_on_interface_levels"].shape[0] == (
+        state["air_temperature"].shape[0] + 1
+    )

@@ -487,6 +487,12 @@ class GFSDynamicsJAX(TendencyStepper):
 
         grid_final, _ = spectral_to_grid(spec_final, self.trans_config)
 
+        from .jax.dynamics import compute_pressure_diagnostics
+
+        pd = compute_pressure_diagnostics(
+            grid_final.log_surface_pressure, self.dyn_config
+        )
+
         def to_numpy(arr):
             if jnp.iscomplexobj(arr):
                 arr = arr.real
@@ -499,4 +505,9 @@ class GFSDynamicsJAX(TendencyStepper):
             "surface_air_pressure": to_numpy(jnp.exp(grid_final.log_surface_pressure)),
             "specific_humidity": to_numpy(grid_final.tracers[0]),
             "tracers": to_numpy(grid_final.tracers),
+            "air_pressure": to_numpy(pd.prs),
+            # pd.pk is bottom-to-top; climt/component.py convention for
+            # air_pressure_on_interface_levels is top-to-bottom (mirrors the
+            # [::-1] flip in component.py's assign_air_pressure/output path).
+            "air_pressure_on_interface_levels": to_numpy(pd.pk[::-1]),
         }
