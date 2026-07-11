@@ -16,6 +16,8 @@ from .jax.states import GridState
 from .jax.stepper import (
     StepperConfig,
     advance,
+    advance_with_tendencies,
+    PhysicsTendencies,
     init_diffusion_operators,
     init_semi_implicit_matrices,
 )
@@ -74,10 +76,16 @@ class GFSDynamicsJAX(TendencyStepper):
 
     # Override TendencyStepper's abstract/computed properties so these can be
     # set as plain instance attributes in __init__ (mirrors GFSDynamicalCore
-    # in component.py).
-    input_properties = None
-    output_properties = None
-    diagnostic_properties = None
+    # in component.py). Class-level values default to the base (no extra
+    # components) property dicts so that climt.get_default_state([cls], ...)
+    # works even when called with the class itself (not yet instantiated) —
+    # matches the convention used by climt TendencyComponents such as
+    # HeldSuarez, which expose input_properties as a class attribute.
+    # __init__ overwrites these with per-instance dicts merged with whatever
+    # tendency_component_list was passed in.
+    input_properties = _gfs_input_properties
+    output_properties = _gfs_output_properties
+    diagnostic_properties = _gfs_diagnostic_properties
 
     @property
     def spectral_names(self):
@@ -153,6 +161,10 @@ class GFSDynamicsJAX(TendencyStepper):
         # (static fields marked pytree_node=False), so they trace cleanly.
         # First call compiles (~30 s); subsequent steps run fully fused.
         self._jit_advance = jax.jit(advance)
+        # Pure-function variant that also applies a time-split physics
+        # increment (grid-space PhysicsTendencies -> spectral) inside the
+        # same jit trace. Used whenever self._phys_tendencies is set.
+        self._jit_advance_t = jax.jit(advance_with_tendencies)
         # Cached spectral state: only do grid_to_spectral once (for the
         # initial condition).  After that, advance directly in spectral
         # space to avoid repeated grid→spectral→grid round-trip errors.
@@ -161,6 +173,12 @@ class GFSDynamicsJAX(TendencyStepper):
         # time-split after the dynamics step — mirrors Fortran run.f90's
         # getphytend adjustment and the wrapper's assign_tendencies path.
         self._phys_tendencies = None
+
+    def _fvirt(self):
+        """(1 - Rd/Rv) / (Rd/Rv) — virtual-temperature moisture coefficient."""
+        rd = get_constant("gas_constant_of_dry_air", "J kg^-1 K^-1")
+        rv = get_constant("gas_constant_of_vapor_phase", "J kg^-1 K^-1")
+        return (1 - rd / rv) / (rd / rv)
 
     def set_physics_tendencies(self, u_tend=None, v_tend=None, t_tend=None):
         """Set grid-space physics tendencies (e.g. Held-Suarez forcing) to be
@@ -175,54 +193,73 @@ class GFSDynamicsJAX(TendencyStepper):
         if u_tend is None and v_tend is None and t_tend is None:
             self._phys_tendencies = None
         else:
-            self._phys_tendencies = (
-                jnp.asarray(u_tend),
-                jnp.asarray(v_tend),
-                jnp.asarray(t_tend),
+            u_t = jnp.asarray(u_tend)
+            v_t = jnp.asarray(v_tend)
+            t_t = jnp.asarray(t_tend)
+            n_lev, n_lat, n_lon = t_t.shape
+            # Number of tracers must match the dynamical core's tracer stack
+            # (always >= 1: specific_humidity is prepended). Zero tendency
+            # for all of them since this legacy path only forces u/v/T.
+            n_tracers = len(self._tracer_packer.tracer_names)
+            self._phys_tendencies = PhysicsTendencies(
+                u=u_t,
+                v=v_t,
+                virtual_temperature=t_t,
+                log_surface_pressure=jnp.zeros((n_lat, n_lon)),
+                tracers=jnp.zeros((n_tracers, n_lev, n_lat, n_lon)),
             )
 
-    def _apply_physics_tendencies(self, spec_state, dt):
-        """Convert grid physics tendencies to spectral and apply time-split."""
-        from .jax.states import SpectralState
-        from .jax.transforms import enforce_triangular_truncation
+    def __call__(self, state, timestep):
+        """Fortran-style, component-driven step: gather physics tendencies
+        from ``self._tendency_component`` and route them through the pure
+        ``advance_with_tendencies`` alongside the dynamics step.
 
-        u_t, v_t, t_t = self._phys_tendencies
-        L = self.trans_config.L
-        sampling = self.trans_config.sampling
-        radius = self.dyn_config.radius
-        T = self.trans_config.truncation
+        Mirrors ``GFSDynamicalCore.__call__`` in component.py, simplified
+        since JAX handles its own internal sub-stepping (no air_pressure
+        consistency assertions needed here).
+        """
+        raw_state = get_numpy_arrays_with_properties(state, self.input_properties)
+        raw_state["tracers"] = self._tracer_packer.pack(state)
+        raw_state["time"] = state["time"]
 
-        l_arr = jnp.arange(L)
-        l_factor = jnp.sqrt(l_arr * (l_arr + 1))
+        tendencies, diagnostics = self._tendency_component(state, timestep)
+        for name, value in tendencies.items():
+            if name in self.input_properties:
+                tendencies[name] = value.to_units(
+                    self.input_properties[name]["units"] + " s^-1"
+                )
 
-        def uv_to_vrtdiv(u, v):
-            F1 = s2_forward(-v + 1j * u, L, sampling, spin=1)
-            Fm1 = s2_forward(v + 1j * u, L, sampling, spin=-1)
-            rp = l_factor[:, None] * F1 / radius
-            rm = l_factor[:, None] * Fm1 / radius
-            return (rp - rm) / 2j, (rp + rm) / 2  # vort, div
-
-        vort_t, div_t = jax.vmap(uv_to_vrtdiv)(u_t, v_t)
-        temp_t = jax.vmap(lambda f: s2_forward(f, L, sampling))(t_t)
-
-        vort_t = enforce_triangular_truncation(vort_t, L, T)
-        div_t = enforce_triangular_truncation(div_t, L, T)
-        temp_t = enforce_triangular_truncation(temp_t, L, T)
-
-        return SpectralState(
-            vorticity=spec_state.vorticity + dt * vort_t,
-            divergence=spec_state.divergence + dt * div_t,
-            temperature=spec_state.temperature + dt * temp_t,
-            log_surface_pressure=spec_state.log_surface_pressure,
-            tracers=spec_state.tracers,
+        raw_diag, raw_new = self.array_call(
+            raw_state, timestep, prognostic_tendencies=tendencies
         )
 
-    def array_call(self, state, timestep):
+        new_state = self._tracer_packer.unpack(raw_new.pop("tracers"), state)
+        new_state.update(
+            restore_data_arrays_with_properties(
+                raw_new, self.output_properties, state, self.input_properties,
+                ignore_missing=True,
+            )
+        )
+        diagnostics.update(
+            restore_data_arrays_with_properties(
+                raw_diag, self.diagnostic_properties, state, self.input_properties,
+                ignore_missing=True,
+            )
+        )
+        for key in state.keys():
+            if key not in new_state:
+                new_state[key] = state[key]
+        return diagnostics, new_state
+
+    def array_call(self, state, timestep, prognostic_tendencies=None):
+        prognostic_tendencies = prognostic_tendencies or {}
         u = jnp.array(state["eastward_wind"])
         v = jnp.array(state["northward_wind"])
         temp = jnp.array(state["air_temperature"])
         ps = jnp.array(state["surface_air_pressure"])
-        q = jnp.array(state["specific_humidity"])
+        # specific_humidity is always tracer index 0 (prepend_tracers puts it
+        # first; see TracerPacker.tracer_names).
+        q = jnp.array(state["tracers"][0])
         phis = jnp.array(state["surface_geopotential"])
 
         ak_jnp = jnp.array(state["a_coord"])
@@ -367,23 +404,82 @@ class GFSDynamicsJAX(TendencyStepper):
                 pwat_global_init = float(jnp.sum(w * pwat_init) / n_lon)
                 self._pdryini = pmean_init - g * pwat_global_init
 
+        # Build grid-space physics tendencies from component output (bottom-
+        # to-top), applying the virtual-temperature correction so temperature
+        # and moisture tendencies combine consistently — mirrors the Fortran
+        # wrapper's assign_tendencies path.
+        if prognostic_tendencies:
+            def tend_or_zero(name, shape):
+                if name in prognostic_tendencies:
+                    arr = (
+                        prognostic_tendencies[name]
+                        .to_units(self.input_properties[name]["units"] + " s^-1")
+                        .transpose(*self.input_properties[name]["dims"])
+                        .values
+                    )
+                    return jnp.asarray(np.ascontiguousarray(arr))
+                return jnp.zeros(shape)
+
+            u_t = tend_or_zero("eastward_wind", (n_lev, n_lat, n_lon))
+            v_t = tend_or_zero("northward_wind", (n_lev, n_lat, n_lon))
+            t_t = tend_or_zero("air_temperature", (n_lev, n_lat, n_lon))
+            ps_t = tend_or_zero("surface_air_pressure", (n_lat, n_lon))
+            fvirt = self._fvirt()
+            t_virt = temp * (1 + fvirt * q)
+
+            n_tracers = state["tracers"].shape[0]
+            tracer_t = (
+                jnp.stack(
+                    [
+                        tend_or_zero(name, (n_lev, n_lat, n_lon))
+                        for name in self._tracer_packer.tracer_names
+                    ],
+                    axis=0,
+                )
+                if n_tracers
+                else jnp.zeros((0, n_lev, n_lat, n_lon))
+            )
+            q_t = tracer_t[0] if n_tracers else jnp.zeros((n_lev, n_lat, n_lon))
+
+            virtual_temp_tend = t_t * (1 + fvirt * q) + fvirt * t_virt * q_t
+            lnps_tend = ps_t / ps
+
+            self._phys_tendencies = PhysicsTendencies(
+                u=u_t,
+                v=v_t,
+                virtual_temperature=virtual_temp_tend,
+                log_surface_pressure=lnps_tend,
+                tracers=tracer_t,
+            )
+
         # Advance one timestep (dry-mass fixer activated via gauss_weights +
         # pdryini when adiabatic=False, matching Fortran run.f90 lines 349-356).
-        spec_final = self._jit_advance(
-            spec_orig,
-            self._phis_grads,
-            self.dyn_config,
-            self.trans_config,
-            self.stepper_config,
-            self._latitudes,
-            self._gauss_weights,
-            self._pdryini,
-        )
-
         # Time-split physics adjustment (Held-Suarez etc.), matching the
-        # Fortran wrapper's assign_tendencies + run.f90 physics block.
+        # Fortran wrapper's assign_tendencies + run.f90 physics block, is
+        # folded into the same pure-function call when tendencies are set.
         if self._phys_tendencies is not None:
-            spec_final = self._apply_physics_tendencies(spec_final, dt)
+            spec_final = self._jit_advance_t(
+                spec_orig,
+                self._phys_tendencies,
+                self._phis_grads,
+                self.dyn_config,
+                self.trans_config,
+                self.stepper_config,
+                self._latitudes,
+                self._gauss_weights,
+                self._pdryini,
+            )
+        else:
+            spec_final = self._jit_advance(
+                spec_orig,
+                self._phis_grads,
+                self.dyn_config,
+                self.trans_config,
+                self.stepper_config,
+                self._latitudes,
+                self._gauss_weights,
+                self._pdryini,
+            )
 
         # Cache the spectral state for the next call so we never re-do
         # grid→spectral (which would accumulate truncation error).
@@ -402,4 +498,5 @@ class GFSDynamicsJAX(TendencyStepper):
             "northward_wind": to_numpy(grid_final.v),
             "surface_air_pressure": to_numpy(jnp.exp(grid_final.log_surface_pressure)),
             "specific_humidity": to_numpy(grid_final.tracers[0]),
+            "tracers": to_numpy(grid_final.tracers),
         }

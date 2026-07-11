@@ -227,3 +227,41 @@ def test_advance_with_spectral_tendencies_is_differentiable():
 
     g = jax.grad(loss)(1.0)
     assert jnp.isfinite(g)
+
+
+from datetime import timedelta
+import numpy as np
+
+
+def test_component_path_matches_manual_tendencies():
+    L, n_lev = 16, 10
+    grid = climt.get_grid(nx=2 * L - 1, ny=L, nz=n_lev)
+    hs = climt.HeldSuarez()
+    from gfs_dynamical_core.component_jax import GFSDynamicsJAX
+    from gfs_dynamical_core.jax.dynamics import compute_pressure_diagnostics
+
+    ts = timedelta(minutes=10)
+
+    # --- component path ---
+    dyn_a = GFSDynamicsJAX(tendency_component_list=[hs])
+    state_a = climt.get_default_state([dyn_a], grid_state=grid)
+    _, out_a = dyn_a(state_a, timestep=ts)
+
+    # --- manual path: same forcing pushed via set_physics_tendencies ---
+    dyn_b = GFSDynamicsJAX()  # no components
+    state_b = climt.get_default_state([dyn_b], grid_state=grid)
+    tend, _ = hs(state_b)
+    u_t = tend["eastward_wind"].transpose("mid_levels", "lat", "lon").values
+    v_t = tend["northward_wind"].transpose("mid_levels", "lat", "lon").values
+    t_t = tend["air_temperature"].transpose("mid_levels", "lat", "lon").values
+    dyn_b.set_physics_tendencies(u_t, v_t, t_t)
+    _, out_b = dyn_b(state_b, timestep=ts)
+
+    # HS produces only u/v/T tendencies (no moisture), so virtual-T parity
+    # reduces to the plain-T path and the two must agree closely.
+    np.testing.assert_allclose(
+        out_a["eastward_wind"].values, out_b["eastward_wind"].values,
+        rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        out_a["air_temperature"].values, out_b["air_temperature"].values,
+        rtol=1e-6, atol=1e-6)
