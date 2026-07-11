@@ -10,6 +10,21 @@ def test_get_valid_properties_filters_known_quantities():
     assert "my_forcing" in result            # extra quantity surfaced
 
 
+import climt
+
+
+def test_jax_core_accepts_component_list_and_merges_properties():
+    from gfs_dynamical_core.component_jax import GFSDynamicsJAX
+    hs = climt.HeldSuarez()
+    dycore = GFSDynamicsJAX(tendency_component_list=[hs])
+    # air_pressure now an output (needed by internal components)
+    assert "air_pressure" in dycore.output_properties
+    assert "air_pressure_on_interface_levels" in dycore.output_properties
+    # constructed without error and is a TendencyStepper
+    from sympl import TendencyStepper
+    assert isinstance(dycore, TendencyStepper)
+
+
 import os
 os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["JAX_ENABLE_X64"] = "True"

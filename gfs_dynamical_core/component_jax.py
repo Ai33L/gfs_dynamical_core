@@ -1,8 +1,16 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-from sympl import Stepper, get_constant
+from sympl import (
+    TendencyStepper,
+    get_constant,
+    get_tracer_names,
+    ImplicitTendencyComponentComposite,
+    get_numpy_arrays_with_properties,
+    restore_data_arrays_with_properties,
+)
 
+from ._property_utils import GFSError, get_valid_properties
 from .jax.dynamics import DynamicsConfig
 from .jax.states import GridState
 from .jax.stepper import (
@@ -21,20 +29,21 @@ from .jax.transforms import (
 )
 
 
-class GFSDynamicsJAX(Stepper):
+class GFSDynamicsJAX(TendencyStepper):
     """
-    JAX-based implementation of the GFS dynamical core.
+    JAX-based implementation of the GFS dynamical core (component-driven).
     """
 
-    input_properties = {
+    uses_tracers = True
+    tracer_dims = ("tracer", "mid_levels", "lat", "lon")
+    prepend_tracers = (("specific_humidity", "kg/kg"),)
+
+    # base (dynamics-only) property dicts; merged with component props in __init__
+    _gfs_input_properties = {
         "air_temperature": {"units": "K", "dims": ["mid_levels", "lat", "lon"]},
         "eastward_wind": {"units": "m s^-1", "dims": ["mid_levels", "lat", "lon"]},
         "northward_wind": {"units": "m s^-1", "dims": ["mid_levels", "lat", "lon"]},
         "surface_air_pressure": {"units": "Pa", "dims": ["lat", "lon"]},
-        "specific_humidity": {
-            "units": "kg kg^-1",
-            "dims": ["mid_levels", "lat", "lon"],
-        },
         "surface_geopotential": {"units": "m^2 s^-2", "dims": ["lat", "lon"]},
         "atmosphere_hybrid_sigma_pressure_a_coordinate_on_interface_levels": {
             "units": "dimensionless",
@@ -46,24 +55,90 @@ class GFSDynamicsJAX(Stepper):
             "dims": ["interface_levels"],
             "alias": "b_coord",
         },
+        "air_pressure": {"units": "Pa", "dims": ["mid_levels", "lat", "lon"]},
     }
 
-    output_properties = {
+    _gfs_output_properties = {
         "air_temperature": {"units": "K", "dims": ["mid_levels", "lat", "lon"]},
         "eastward_wind": {"units": "m s^-1", "dims": ["mid_levels", "lat", "lon"]},
         "northward_wind": {"units": "m s^-1", "dims": ["mid_levels", "lat", "lon"]},
         "surface_air_pressure": {"units": "Pa", "dims": ["lat", "lon"]},
-        "specific_humidity": {
-            "units": "kg kg^-1",
-            "dims": ["mid_levels", "lat", "lon"],
+        "air_pressure": {"units": "Pa", "dims": ["mid_levels", "lat", "lon"]},
+        "air_pressure_on_interface_levels": {
+            "units": "Pa",
+            "dims": ["interface_levels", "lat", "lon"],
         },
     }
 
-    diagnostic_properties = {}
+    _gfs_diagnostic_properties = {}
 
-    def __init__(self, adiabatic=False, **kwargs):
+    # Override TendencyStepper's abstract/computed properties so these can be
+    # set as plain instance attributes in __init__ (mirrors GFSDynamicalCore
+    # in component.py).
+    input_properties = None
+    output_properties = None
+    diagnostic_properties = None
+
+    @property
+    def spectral_names(self):
+        return (
+            "eastward_wind",
+            "northward_wind",
+            "air_temperature",
+            "surface_air_pressure",
+        ) + get_tracer_names()
+
+    def __init__(
+        self,
+        tendency_component_list=None,
+        adiabatic=False,
+        zero_negative_moisture=True,
+        **kwargs,
+    ):
+        tendency_component_list = tendency_component_list or []
+        self._tendency_component = ImplicitTendencyComponentComposite(
+            *tendency_component_list
+        )
+        bad = set(
+            self._tendency_component.diagnostic_properties.keys()
+        ).intersection(self.spectral_names)
+        if bad:
+            raise GFSError(
+                "Components may not emit {} as diagnostics; these are stepped "
+                "spectrally.".format(bad)
+            )
+
+        self.input_properties = dict(self._gfs_input_properties)
+        self.output_properties = dict(self._gfs_output_properties)
+        self.diagnostic_properties = dict(self._gfs_diagnostic_properties)
+
         super().__init__(**kwargs)
+
+        self.input_properties.update(
+            get_valid_properties(
+                self._gfs_input_properties,
+                self._tendency_component.input_properties,
+                "input",
+            )
+        )
+        self.output_properties.update(
+            get_valid_properties(
+                self._gfs_output_properties,
+                self._tendency_component.tendency_properties,
+                "output",
+            )
+        )
+        self.diagnostic_properties.update(
+            get_valid_properties(
+                self._gfs_diagnostic_properties,
+                self._tendency_component.diagnostic_properties,
+                "diagnostic",
+            )
+        )
+
         self.adiabatic = adiabatic
+        self._zero_negative_moisture = zero_negative_moisture
+        # ---- existing jnp-pipeline state (unchanged) ----
         self.dyn_config = None
         self.trans_config = None
         self.stepper_config = None
