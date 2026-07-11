@@ -49,6 +49,21 @@ def _mock_state(n_lev, L, n_tracers=1):
     )
 
 
+def test_advance_handles_two_tracers():
+    L, n_lev = 8, 10
+    dyn = _mock_dyn_config(n_lev)
+    trans = TransformConfig(L=L, radius=1.0)
+    sc = StepperConfig(dt=10.0, explicit=True)
+    lat = get_gaussian_latitudes(L)
+    n_lat, n_lon = trans.n_lat, trans.n_lon
+    phis = (jnp.zeros((n_lat, n_lon)), jnp.zeros((n_lat, n_lon)))
+    state = _mock_state(n_lev, L, n_tracers=2)
+
+    out = advance(state, phis, dyn, trans, sc, lat)
+    assert out.tracers.shape == (2, n_lev, L, 2 * L - 1)
+    assert not jnp.isnan(out.tracers).any()
+
+
 def test_advance_with_zero_tendencies_matches_advance():
     L, n_lev = 8, 10
     dyn = _mock_dyn_config(n_lev)
