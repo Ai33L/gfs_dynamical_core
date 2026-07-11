@@ -148,3 +148,52 @@ def test_grid_and_spectral_paths_compose_additively():
         expected = (getattr(only_grid, f) + getattr(only_spec, f)
                     - getattr(base, f))
         assert jnp.allclose(getattr(both, f), expected)
+
+
+def test_advance_with_tendencies_is_differentiable():
+    L, n_lev = 8, 10
+    dyn = _mock_dyn_config(n_lev)
+    trans = TransformConfig(L=L, radius=1.0)
+    sc = StepperConfig(dt=10.0, explicit=True)
+    lat = get_gaussian_latitudes(L)
+    n_lat, n_lon = trans.n_lat, trans.n_lon
+    phis = (jnp.zeros((n_lat, n_lon)), jnp.zeros((n_lat, n_lon)))
+    state = _mock_state(n_lev, L)
+
+    def loss(scale):
+        tends = PhysicsTendencies(
+            u=scale * jnp.ones((n_lev, n_lat, n_lon)),
+            v=jnp.zeros((n_lev, n_lat, n_lon)),
+            virtual_temperature=jnp.zeros((n_lev, n_lat, n_lon)),
+            log_surface_pressure=jnp.zeros((n_lat, n_lon)),
+            tracers=jnp.zeros((1, n_lev, n_lat, n_lon)),
+        )
+        out = advance_with_tendencies(state, tends, phis, dyn, trans, sc, lat)
+        return jnp.sum(jnp.abs(out.divergence) ** 2)
+
+    g = jax.grad(loss)(1.0)
+    assert jnp.isfinite(g)
+
+
+def test_advance_with_spectral_tendencies_is_differentiable():
+    """Gradients must flow through the spectral (spec_tends) injection path —
+    this is the path SKEB/SPPT train through."""
+    L, n_lev = 8, 10
+    dyn = _mock_dyn_config(n_lev)
+    trans = TransformConfig(L=L, radius=1.0)
+    sc = StepperConfig(dt=10.0, explicit=True)
+    lat = get_gaussian_latitudes(L)
+    n_lat, n_lon = trans.n_lat, trans.n_lon
+    phis = (jnp.zeros((n_lat, n_lon)), jnp.zeros((n_lat, n_lon)))
+    state = _mock_state(n_lev, L)
+
+    def loss(amp):
+        bump = jnp.zeros((n_lev, L, 2 * L - 1), dtype=jnp.complex128).at[:, 2, L].set(1.0)
+        spec_t = _zero_spec_tends(n_lev, L).replace(d_vorticity_d_t=amp * bump)
+        out = advance_with_tendencies(
+            state, None, phis, dyn, trans, sc, lat, spec_tends=spec_t
+        )
+        return jnp.sum(jnp.abs(out.vorticity) ** 2)
+
+    g = jax.grad(loss)(1.0)
+    assert jnp.isfinite(g)
