@@ -164,21 +164,53 @@ The internal jnp pipeline currently hardcodes one tracer. It generalizes to
 
 ### 5. Differentiable pure function
 
-Extract the grid-tendency → spectral conversion + advance into a module-level
-pure jnp function in `stepper.py`:
+Extract the tendency → spectral increment + advance into a module-level pure
+jnp function in `stepper.py`:
 
 ```python
-def advance_with_tendencies(spec_state, grid_tends, phis_grads,
+def advance_with_tendencies(spec_state, phys_tends, phis_grads,
                             dyn_config, trans_config, stepper_config,
-                            latitudes, gauss_weights, pdryini) -> SpectralState:
+                            latitudes, gauss_weights=None, pdryini=None,
+                            spec_tends=None) -> SpectralState:
     ...
 ```
 
-`grid_tends` is a small flax-struct dataclass carrying grid-space jnp
-tendencies for u, v, virtual-T, lnps, and tracers (any field `None`/zero ⇒ no
-contribution). The function is fully `jit`/`grad`/`vmap`-able with no
-sympl/numpy in the path. `_apply_physics_tendencies` and the component path
-both become thin wrappers over it; gradient users call it directly.
+The function advances the dynamics one step and then applies a **single
+time-split increment assembled from two independent tendency containers**,
+either of which may be `None`:
+
+- **`phys_tends`** — a `PhysicsTendencies` flax-struct dataclass carrying
+  *grid-space* jnp tendencies for u, v, virtual-T, lnps, and tracers. These are
+  transformed to spectral coefficients internally (u, v → vorticity/divergence;
+  the rest via `s2_forward`), then truncated. This is the path physical /
+  learned column physics uses (Held–Suarez, the convection scheme, an NN
+  residual).
+- **`spec_tends`** — an optional `SpectralTendencies` flax-struct dataclass
+  (the one already defined in `states.py`: `d_vorticity_d_t`,
+  `d_divergence_d_t`, `d_temperature_d_t`, `d_log_surface_pressure_d_t`,
+  `d_tracers_d_t`) carrying tendencies **already in spectral space**. These are
+  added directly to the increment with no grid→spectral transform. This is the
+  path stochastic / spectral-native components use — notably **SKEB**, which
+  generates a kinetic-energy-backscatter perturbation to the *vorticity*
+  tendency natively in spectral space (where its AR(1) pattern and the
+  reality-symmetry guard live), and trainable **SPPT**, whose AR(1) pattern is
+  spectral.
+
+The two increments are summed field-by-field before the `x += dt * tendency`
+update, so a caller may supply grid tendencies, spectral tendencies, both, or
+neither. Container-level `None` is a trace-time structural choice (JIT-safe);
+within a supplied container, unused fields are zero arrays so the whole path
+stays `jit`/`grad`/`vmap`-able with no sympl/numpy in it. `_apply_physics_
+tendencies` and the component path both become thin wrappers over the
+`phys_tends` route; gradient users and stochastic components call the function
+directly, using whichever container fits their tendency's natural space.
+
+**Rationale for the dual container (logged):** injecting a spectral-space
+perturbation directly avoids a spurious grid→spectral round-trip and its
+truncation error, and it is the natural interface for the stochastic-physics
+component family (SKEB, SPPT) and for adjoint / singular-vector work, all of
+which live in spectral space. Reusing the existing `SpectralTendencies` struct
+keeps the surface minimal.
 
 ### 6. Driver simplification
 
