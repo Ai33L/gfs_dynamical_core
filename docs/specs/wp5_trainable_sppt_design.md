@@ -259,7 +259,11 @@ analyze.py: trained params + held-out cases ► calibration metrics + plots
 
 - **SKEB (WP6):** reuse `sppt.py`'s spectral generator; inject additively via
   `spec_tends.d_vorticity_d_t`; modulate by `sqrt(dissipation)`; trainable
-  backscatter amplitude/spectrum.
+  backscatter amplitude/spectrum. **Flow-dependence:** classic SKEB is
+  flow-dependent only in *amplitude* (via `√D_tot`), not in pattern *structure*;
+  in the dry core only `D_num` (hyperdiffusion `disspec`) is available; the learned
+  state-dependent amplitude is the structure-level rung. See the WP6 flow-dependence
+  note in `wp5_stochastic_sppt_handoff.md`.
 - SP2 two-scale pattern; per-wavenumber τ; NN amplitude field σ(x) (toward
   latent-noise, WP6); IC-perturbation ensemble seeding; ERA5 truth (C-WP3);
   multi-GPU member sharding (`shard_map`).

@@ -92,6 +92,43 @@ after a few optimizer steps. Then scale up.
   shapes the response. Subsumes SPPT. fair-CRPS trained. Acceptance (H-WP6):
   beats trained SPPT on CRPS for Z500 & T2m at 3–10 d.
 
+### Note: is classic SKEB flow-dependent? (amplitude yes, structure no)
+
+Verified against Palmer et al. 2009 (Tech Memo 598, §2.2.2–2.2.3, App. 8.2).
+Classic SPBS/SKEB is `F_ψ = √(b_R · D_tot / B_tot) · F_ψ*` — **two factors, and the
+flow-dependence lives in only one:**
+
+- `F_ψ*` (the random pattern) is **flow-independent** — a spectral AR(1) field with
+  a *fixed* power-law spectrum `g(n)`; same machinery as the WP5 SPPT generator,
+  just for streamfunction. Which structures it excites does not depend on state.
+- `√D_tot` (the amplitude modulator) is **flow-dependent** — `D_tot(x,y,z,t)` is the
+  total dissipation rate (§2.2.3: **numerical** = explicit biharmonic + implicit
+  diffusion energy loss, **gravity-wave-drag**, and **convective** dissipation). So
+  backscatter is strong where the flow actively dissipates energy (sharp gradients,
+  active jets, convection, mountains). `b_R` is the scalar backscatter ratio.
+
+So classic SKEB gives flow-dependent **amplitude/location**, *not* flow-dependent
+**structure**. It energizes dynamically active regions (correlated with baroclinic
+activity) but does not preferentially excite the ridge-amplification / blocking-onset
+directions that define a heatwave event. **Three rungs of flow-dependence:**
+
+1. **SPPT** — perturbation location follows the physics-tendency field (weak,
+   incidental); pattern fixed.
+2. **Classic SKEB** — amplitude follows `√D_tot` (genuine physical flow-dependence
+   in *where*); pattern still fixed-spectrum.
+3. **Learned SKEB / latent-noise NN** — the network makes the *structure*
+   state-dependent (excite the event-relevant growing modes). This is the
+   flow-dependence RES event-targeting actually needs (§3.3.3 "relevance").
+
+**Dry-Held-Suarez caveat:** `D_tot`'s convective and GWD components do not exist in
+the dry core. Only **`D_num`** survives — and we already have that operator (the
+hyperdiffusion `disspec` in `StepperConfig`). A classic SKEB here is
+`pattern × √D_num`: genuinely flow-dependent (backscatter where hyperdiffusion
+removes energy — small scales, sharp gradients, active jets), but thinner than the
+IFS `D_tot`. The differentiable version keeps the `√D_tot` amplitude prior "for
+free" and makes `b_R`, the spectrum `g(n)`, and ultimately a state-dependent
+amplitude field trainable — that trainable state-dependent amplitude is rung 3.
+
 ---
 
 ## Open items / decisions carried forward
