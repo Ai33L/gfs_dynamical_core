@@ -329,10 +329,15 @@ def _register_test_tracer(name, default_value, units="kg/kg"):
 
 
 def _unregister_test_tracer(name):
-    """Undo _register_test_tracer so nothing leaks into other tests."""
+    """Undo _register_test_tracer so nothing leaks into other tests. sympl
+    tracks tracers in TWO registries — _tracer_unit_dict (units) and
+    _tracer_names (what get_tracer_names() returns) — so both must be cleared,
+    else a later test sees a phantom tracer with no units (KeyError)."""
     try:
-        from sympl._core.tracers import _tracer_unit_dict
+        from sympl._core.tracers import _tracer_unit_dict, _tracer_names
         _tracer_unit_dict.pop(name, None)
+        while name in _tracer_names:
+            _tracer_names.remove(name)
     except Exception:
         pass
     try:
@@ -401,3 +406,28 @@ def test_multi_tracer_values_not_scrambled():
         assert abs(q_out.mean() - Q0) < 0.1 * abs(q_out.mean() - T0)
     finally:
         _unregister_test_tracer("test_tracer")
+
+
+def test_zero_negative_moisture_clips_tracer_zero():
+    """With zero_negative_moisture=True (default, Fortran parity), negative
+    specific humidity is clipped to zero after the step; with it disabled the
+    negatives survive. A uniform field is advection/diffusion-invariant, so the
+    only thing that can change a uniform -1e-3 humidity is the clip."""
+    from gfs_dynamical_core.component_jax import GFSDynamicsJAX
+    L, n_lev = 16, 10
+    grid = climt.get_grid(nx=2 * L - 1, ny=L, nz=n_lev)
+    ts = timedelta(minutes=10)
+
+    # Clipping ON (default): negatives removed.
+    dyc = GFSDynamicsJAX()
+    state = climt.get_default_state([dyc], grid_state=grid)
+    state["specific_humidity"].values[:] = -1e-3
+    _, out = dyc(state, timestep=ts)
+    assert (out["specific_humidity"].values >= 0.0).all()
+
+    # Clipping OFF: the negative humidity survives the step.
+    dyc2 = GFSDynamicsJAX(zero_negative_moisture=False)
+    state2 = climt.get_default_state([dyc2], grid_state=grid)
+    state2["specific_humidity"].values[:] = -1e-3
+    _, out2 = dyc2(state2, timestep=ts)
+    assert (out2["specific_humidity"].values < 0.0).any()

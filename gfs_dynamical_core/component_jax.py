@@ -11,7 +11,7 @@ from sympl import (
 )
 
 from ._property_utils import GFSError, get_valid_properties
-from .jax.dynamics import DynamicsConfig
+from .jax.dynamics import DynamicsConfig, compute_pressure_diagnostics
 from .jax.states import GridState
 from .jax.stepper import (
     StepperConfig,
@@ -28,6 +28,7 @@ from .jax.transforms import (
     get_gaussian_latitudes,
     grid_to_spectral,
     spectral_to_grid,
+    enforce_triangular_truncation,
 )
 
 
@@ -394,8 +395,6 @@ class GFSDynamicsJAX(TendencyStepper):
                 self._gauss_weights = jnp.array(raw_weights / 2.0)
 
             if self._pdryini is None:
-                from .jax.dynamics import compute_pressure_diagnostics
-
                 lnps_grid = jnp.log(ps)
                 press_diag_init = compute_pressure_diagnostics(lnps_grid, self.dyn_config)
                 q_init = jnp.array(q)  # (n_lev, n_lat, n_lon)
@@ -485,13 +484,34 @@ class GFSDynamicsJAX(TendencyStepper):
                 self._pdryini,
             )
 
-        # Cache the spectral state for the next call so we never re-do
-        # grid→spectral (which would accumulate truncation error).
-        self._spec_state = spec_final
-
         grid_final, _ = spectral_to_grid(spec_final, self.trans_config)
 
-        from .jax.dynamics import compute_pressure_diagnostics
+        # Post-step moisture clipping (Fortran parity: set_negatives_to_zero on
+        # tracer 0, component.py:502-503). Clipping is a grid-point operation,
+        # so we clip specific humidity in grid space and transform the clipped
+        # field back to spectral, updating the cached state that the next step
+        # advances — so the correction actually feeds forward (matching Fortran,
+        # which re-transforms every step). Only tracer 0 is round-tripped; the
+        # dynamics fields keep their cached spectral values untouched. Inert for
+        # dry runs (q≈0 ⇒ maximum(q,0)≈q), so Held–Suarez is unaffected.
+        if self._zero_negative_moisture:
+            q0_clipped = jnp.maximum(grid_final.tracers[0].real, 0.0)
+            grid_final = grid_final.replace(
+                tracers=grid_final.tracers.at[0].set(q0_clipped)
+            )
+            L = self.trans_config.L
+            sampling = self.trans_config.sampling
+            T = self.trans_config.truncation
+            q0_spec = enforce_triangular_truncation(
+                jax.vmap(lambda f: s2_forward(f, L, sampling))(q0_clipped), L, T
+            )
+            spec_final = spec_final.replace(
+                tracers=spec_final.tracers.at[0].set(q0_spec)
+            )
+
+        # Cache the (possibly moisture-clipped) spectral state for the next
+        # call so we never re-do grid→spectral for the dynamics fields.
+        self._spec_state = spec_final
 
         pd = compute_pressure_diagnostics(
             grid_final.log_surface_pressure, self.dyn_config
