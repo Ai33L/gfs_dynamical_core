@@ -2,13 +2,12 @@
 
 Usage: python heldsuarez_run.py {fortran|jax} [n_days] [spinup_days]
 
-Both dycores use the IDENTICAL climt.HeldSuarez forcing component:
-- Fortran: coupled via GFSDynamicalCore(tendency_component_list=[hs])
-  (the wrapper converts u/v tendencies to vort/div and Fortran applies
-  them time-split after dynamics).
-- JAX: the driver calls hs(state) each step and passes the numpy
-  tendencies via GFSDynamicsJAX.set_physics_tendencies, which applies
-  the identical time-split spectral adjustment.
+Both dycores use the IDENTICAL climt.HeldSuarez forcing component, coupled
+the SAME way — as a tendency_component_list on a component-driven core:
+- Fortran: GFSDynamicalCore(tendency_component_list=[hs])
+- JAX:     GFSDynamicsJAX(tendency_component_list=[hs])
+Each core runs the forcing internally and applies the time-split spectral
+adjustment; the driver loop is mode-agnostic.
 
 Accumulates zonal-mean u, T (and pressure) every 6 h after spinup and
 writes hs_zonal_mean_{mode}.npz in the cwd.
@@ -50,14 +49,12 @@ if MODE == "fortran":
     from gfs_dynamical_core import GFSDynamicalCore
 
     dycore = GFSDynamicalCore(tendency_component_list=[hs])
-    state = climt.get_default_state([dycore], grid_state=grid)
 else:
     from gfs_dynamical_core.component_jax import GFSDynamicsJAX
-    from gfs_dynamical_core.jax.dynamics import compute_pressure_diagnostics
-    import jax.numpy as jnp
 
-    dycore = GFSDynamicsJAX()
-    state = climt.get_default_state([dycore], grid_state=grid)
+    dycore = GFSDynamicsJAX(tendency_component_list=[hs])
+
+state = climt.get_default_state([dycore], grid_state=grid)
 
 # Identical random thermal perturbation to break zonal symmetry (same seed).
 rng = np.random.default_rng(7)
@@ -73,24 +70,8 @@ T_sum = np.zeros((N_LEV, L))
 p_sum = np.zeros((N_LEV, L))
 n_samples = 0
 
-_dyn_cfg = None
 t0 = time.time()
 for i in range(1, N_STEPS + 1):
-    if MODE == "jax":
-        # HS needs 3-D air_pressure consistent with current ps.
-        if _dyn_cfg is None and dycore.dyn_config is not None:
-            _dyn_cfg = dycore.dyn_config
-        if _dyn_cfg is not None:
-            pd = compute_pressure_diagnostics(
-                jnp.log(jnp.asarray(state["surface_air_pressure"].values)), _dyn_cfg
-            )
-            state["air_pressure"].values[:] = np.asarray(pd.prs)
-        tend, _ = hs(state)
-        u_t = tend["eastward_wind"].transpose("mid_levels", "lat", "lon").values
-        v_t = tend["northward_wind"].transpose("mid_levels", "lat", "lon").values
-        t_t = tend["air_temperature"].transpose("mid_levels", "lat", "lon").values
-        dycore.set_physics_tendencies(u_t, v_t, t_t)
-
     _, out = dycore(state, timestep=timestep)
     state.update(out)
     state["time"] += timestep
