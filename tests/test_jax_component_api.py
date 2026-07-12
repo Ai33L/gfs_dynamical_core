@@ -315,3 +315,89 @@ def test_array_call_outputs_air_pressure():
     assert raw_out["air_pressure_on_interface_levels"].shape[0] == (
         state["air_temperature"].shape[0] + 1
     )
+
+
+def _register_test_tracer(name, default_value, units="kg/kg"):
+    """Register a tracer AND give climt a default value for it, so
+    ``climt.get_default_state`` can initialize it (registration alone is not
+    enough — climt needs an entry in its ``default_values`` registry)."""
+    from sympl import register_tracer
+    import climt._core.initialization as cinit
+    register_tracer(name, units)
+    cinit.default_values[name] = {
+        "value": default_value, "units": units, "domain": "atmosphere"}
+
+
+def _unregister_test_tracer(name):
+    """Undo _register_test_tracer so nothing leaks into other tests."""
+    try:
+        from sympl._core.tracers import _tracer_unit_dict
+        _tracer_unit_dict.pop(name, None)
+    except Exception:
+        pass
+    try:
+        import climt._core.initialization as cinit
+        cinit.default_values.pop(name, None)
+    except Exception:
+        pass
+
+
+def test_multi_tracer_roundtrip_through_step():
+    _register_test_tracer("test_tracer", 0.0)
+    try:
+        L, n_lev = 16, 10
+        grid = climt.get_grid(nx=2 * L - 1, ny=L, nz=n_lev)
+        from gfs_dynamical_core.component_jax import GFSDynamicsJAX
+        dycore = GFSDynamicsJAX()
+        state = climt.get_default_state([dycore], grid_state=grid)
+        assert "test_tracer" in state
+        _, out = dycore(state, timestep=timedelta(minutes=10))
+        assert "test_tracer" in out
+        assert out["test_tracer"].shape == state["test_tracer"].shape
+        assert not np.isnan(out["test_tracer"].values).any()
+    finally:
+        _unregister_test_tracer("test_tracer")
+
+
+def test_multi_tracer_values_not_scrambled():
+    """Two tracers set to distinct, spatially-uniform constants must each come
+    back near their OWN constant after a step. A uniform tracer field has zero
+    horizontal/vertical gradient, so advection and hyperdiffusion leave it
+    unchanged (the l=0 spectral mode is undamped) — so both tracers are
+    preserved essentially exactly. A bug that swaps/aliases the tracer axis
+    would return test_tracer at ~0.01 (specific_humidity's value) or vice
+    versa; this test catches that (the all-zero tracers of the Task-4 test
+    could not).
+    """
+    _register_test_tracer("test_tracer", 5.0)
+    try:
+        L, n_lev = 16, 10
+        grid = climt.get_grid(nx=2 * L - 1, ny=L, nz=n_lev)
+        from gfs_dynamical_core.component_jax import GFSDynamicsJAX
+        dycore = GFSDynamicsJAX()
+        state = climt.get_default_state([dycore], grid_state=grid)
+
+        # Distinct, well-separated, spatially-uniform tracer fields.
+        Q0, T0 = 0.01, 5.0                       # tracer 0 (humidity), tracer 1
+        state["specific_humidity"].values[:] = Q0
+        state["test_tracer"].values[:] = T0
+
+        _, out = dycore(state, timestep=timedelta(minutes=10))
+
+        q_out = out["specific_humidity"].values
+        t_out = out["test_tracer"].values
+
+        # Each tracer stays essentially at its own uniform constant.
+        assert np.allclose(q_out, Q0, rtol=1e-6, atol=1e-8), (
+            "specific_humidity drifted from its uniform constant: "
+            f"mean={q_out.mean()}, expected {Q0}")
+        assert np.allclose(t_out, T0, rtol=1e-6, atol=1e-8), (
+            "test_tracer drifted from its uniform constant: "
+            f"mean={t_out.mean()}, expected {T0}")
+
+        # Explicit anti-scramble: each output is far closer to its own
+        # constant than to the other tracer's constant.
+        assert abs(t_out.mean() - T0) < 0.1 * abs(t_out.mean() - Q0)
+        assert abs(q_out.mean() - Q0) < 0.1 * abs(q_out.mean() - T0)
+    finally:
+        _unregister_test_tracer("test_tracer")

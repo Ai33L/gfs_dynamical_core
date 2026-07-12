@@ -357,7 +357,11 @@ class GFSDynamicsJAX(TendencyStepper):
                 vorticity=jnp.zeros_like(u),
                 divergence=jnp.zeros_like(u),
                 log_surface_pressure=jnp.log(ps),
-                tracers=jnp.stack([q], axis=0),
+                # Carry ALL packed tracers (specific_humidity is index 0 via
+                # prepend_tracers; any additionally registered tracers follow).
+                # Using only [q] here silently dropped extra tracers, breaking
+                # the pack/unpack round-trip for n_tracers > 1.
+                tracers=jnp.asarray(state["tracers"]),
             )
             spec_orig = grid_to_spectral(grid_orig, self.trans_config)
         else:
