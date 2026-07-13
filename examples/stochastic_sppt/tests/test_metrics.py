@@ -1,0 +1,37 @@
+import jax
+import jax.numpy as jnp
+from examples.stochastic_sppt import metrics
+
+
+def test_afcrps_alpha1_equals_fair():
+    ens = jax.random.normal(jax.random.PRNGKey(0), (8, 5, 5))
+    y = jax.random.normal(jax.random.PRNGKey(1), (5, 5))
+    a = metrics.afcrps(ens, y, alpha=1.0)
+    f = metrics.fair_crps(ens, y)
+    assert abs(float(a) - float(f)) < 1e-10
+
+
+def test_afcrps_nonnegative_and_differentiable():
+    ens = jax.random.normal(jax.random.PRNGKey(2), (6, 4))
+    y = jax.random.normal(jax.random.PRNGKey(3), (4,))
+    assert float(metrics.afcrps(ens, y, 0.95)) >= 0.0
+
+    def loss(scale):
+        return metrics.afcrps(ens * scale, y, 0.95)
+
+    g = jax.grad(loss)(1.0)
+    # finite-difference check
+    eps = 1e-4
+    fd = (loss(1.0 + eps) - loss(1.0 - eps)) / (2 * eps)
+    assert abs(float(g) - float(fd)) < 1e-3
+
+
+def test_reliable_ensemble_spread_error_ratio_near_one():
+    key = jax.random.PRNGKey(4)
+    M, N = 40, 4000
+    truth = jax.random.normal(key, (N,))
+    # members = truth + N(0,1): a reliable (M+1)/M-consistent ensemble
+    noise = jax.random.normal(jax.random.PRNGKey(5), (M, N))
+    ens = truth[None] + noise
+    r = float(metrics.spread_error_ratio(ens, truth))
+    assert 0.9 < r < 1.1
