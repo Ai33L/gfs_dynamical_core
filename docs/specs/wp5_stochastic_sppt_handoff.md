@@ -129,6 +129,44 @@ IFS `D_tot`. The differentiable version keeps the `√D_tot` amplitude prior "fo
 free" and makes `b_R`, the spectrum `g(n)`, and ultimately a state-dependent
 amplitude field trainable — that trainable state-dependent amplitude is rung 3.
 
+#### Restoring `D_conv` with the JAX Emanuel convection scheme
+
+The dry-HS `D_num`-only limitation lifts if the pipeline runs with the JAX Emanuel
+convection scheme (`~/github/climt`, `climt/_components/emanuel/pure_python_v3.py`).
+Its `array_call` exposes everything needed to infer a convective energy-input rate:
+tendencies `FT` (convective heating, K/s), `FQ, FU, FV`; and diagnostics
+`cloud_base_mass_flux` (CBMF, kg m⁻² s⁻¹), `atmosphere_convective_available_potential_energy`
+(CAPE, J/kg), `convective_precipitation_rate` (P), `convective_downdraft_velocity_scale`
+(`wd`, m/s). Three estimators, most direct first:
+
+1. **KE generation from CAPE consumption (recommended):**
+   `D_conv ≈ CBMF · CAPE`  — units `kg m⁻² s⁻¹ · J kg⁻¹ = W m⁻²`, the
+   column-integrated rate convection converts APE→draft KE, i.e. exactly the
+   energy-input rate `B` that SKEB re-injects a fraction `b_R` of. Both factors are
+   direct outputs; it is zero where convection is inactive (`IFLAG`/CBMF=0), which
+   is the desired flow-dependence.
+2. **Heat-engine cross-check:** `D_conv ≈ ε · L_v · P_conv` with `ε` the convective
+   thermodynamic efficiency (few %); agrees with (1) in quasi-equilibrium.
+3. **Downdraft dissipation (local, near-surface):** `D_down ≈ ρ · wd³ / ℓ` from the
+   downdraft velocity scale — complementary cold-pool/downdraught term.
+
+**Vertical distribution:** SKEB needs `D_conv(x,y,z)` on model levels; use the
+per-level convective heating profile `FT` as the shape function to spread the
+column-integrated rate from (1) vertically (backscatter where convection is
+thermodynamically active).
+
+**Two payoffs:** (a) restores a real `D_tot = D_num + D_conv`, so classic SKEB is
+genuinely flow-dependent in amplitude over convective regions, not just numerically;
+(b) since the Emanuel scheme is differentiable and CBMF/CAPE/P/`wd`/`FT` are its
+outputs, `D_conv` — and hence `√D_conv` — is a differentiable function of state, so
+the flow-dependent-amplitude SKEB (and a learned residual on top of the `√D_conv`
+prior) is end-to-end trainable. It also gives SPPT real leverage: a moist model has
+large physics tendencies (`FT, FQ`) to multiply, unlike dry HS.
+
+**Caveat:** the exact operational SPBS `D_conv` formula is in Berner et al. 2009
+(MWR), not yet in `docs/refs/`. The estimators above are physically derived and
+standard; add the Berner PDF to pin the operational form verbatim.
+
 ---
 
 ## Open items / decisions carried forward
