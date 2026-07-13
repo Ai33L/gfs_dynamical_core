@@ -29,9 +29,11 @@ def test_afcrps_nonnegative_and_differentiable():
 def test_reliable_ensemble_spread_error_ratio_near_one():
     key = jax.random.PRNGKey(4)
     M, N = 40, 4000
-    truth = jax.random.normal(key, (N,))
-    # members = truth + N(0,1): a reliable (M+1)/M-consistent ensemble
-    noise = jax.random.normal(jax.random.PRNGKey(5), (M, N))
-    ens = truth[None] + noise
+    # Reliable/exchangeable: a common latent center per location; truth and each
+    # member are that center plus independent unit noise (M+1 exchangeable draws).
+    kc, kt, ke = jax.random.split(key, 3)
+    center = jax.random.normal(kc, (N,))
+    truth = center + jax.random.normal(kt, (N,))
+    ens = center[None] + jax.random.normal(ke, (M, N))
     r = float(metrics.spread_error_ratio(ens, truth))
     assert 0.9 < r < 1.1

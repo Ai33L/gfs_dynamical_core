@@ -29,9 +29,11 @@ def rmse_of_mean(ensemble, truth):
 
 
 def spread_error_ratio(ensemble, truth):
-    """Reliable ensemble => ratio ~ 1 (finite-M correction on the error side)."""
+    """Reliable ensemble => ratio ~ 1. Textbook spread-error consistency
+    (Fortin et al. 2014; Leutbecher 2018): E[(y-xbar)^2] = ((M+1)/M) E[s^2],
+    so a reliable ensemble has sqrt((M+1)/M)*spread == rmse_of_mean."""
     M = ensemble.shape[0]
-    return spread(ensemble) / (jnp.sqrt(M) * rmse_of_mean(ensemble, truth))
+    return jnp.sqrt((M + 1.0) / M) * spread(ensemble) / rmse_of_mean(ensemble, truth)
 
 
 def rank_histogram(ensemble, truth):
