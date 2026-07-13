@@ -11,6 +11,19 @@ from gfs_dynamical_core.jax.transforms import enforce_triangular_truncation, s2_
 # preserve grid-point variance 1:1 against the analytic closed form (measured
 # v=0.01516 for sigma^2=0.25 with _VAR_NORM=1.0); calibrated here via
 # _VAR_NORM = 0.25 / v against test_grid_variance_matches_sigma.
+#
+# CAVEAT (accepted, not a bug): this single scalar is calibrated at T21 (L=32)
+# only. The transform-convention factor is NOT resolution-independent — measured
+# grid variance for sigma^2=0.25 is ~0.25 at T21 but ~0.31 (ratio ~1.25) at
+# T42/T85/T127. So `sigma` == grid-point std holds exactly only at T21; at
+# production resolutions the true grid-point std is ~1.12x exp(log_sigma).
+# This does NOT break the pipeline: Mode-A parameter recovery is exact (the
+# factor cancels between truth and forecast) and Mode-B spread calibration is
+# unaffected (the optimizer learns whatever log_sigma yields matching spread) —
+# only the physical interpretation of a learned log_sigma is offset. Left
+# constant intentionally to observe how the optimizer tunes the effective sigma.
+# To restore sigma==grid-std at all L, make the normalization per-L (derive F0
+# from s2_inverse's Parseval convention or calibrate at build time).
 _VAR_NORM = 16.496188577716463
 
 
