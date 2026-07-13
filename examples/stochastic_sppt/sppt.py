@@ -4,6 +4,8 @@ import jax.numpy as jnp
 from flax import struct
 
 from gfs_dynamical_core.jax.transforms import enforce_triangular_truncation, s2_inverse
+from gfs_dynamical_core.jax.dynamics import compute_pressure_diagnostics
+from gfs_dynamical_core.jax.stepper import PhysicsTendencies
 
 # Calibration constant for the grid-point variance normalization; kept explicit
 # so the analytic F0 (Palmer eq. 18) can be reconciled with the s2fft transform
@@ -90,3 +92,34 @@ def pattern_to_grid(r_lm, trans_config):
     """Inverse transform to a real grid-space pattern."""
     g = s2_inverse(r_lm, trans_config.L, trans_config.sampling)
     return g.real
+
+
+def _ramp(x, x0, x1):
+    """Smooth 0->1 ramp (sin^2) as x goes from x0 to x1 (either order)."""
+    t = jnp.clip((x - x0) / (x1 - x0), 0.0, 1.0)
+    return jnp.sin(0.5 * jnp.pi * t) ** 2
+
+
+def vertical_taper(bundle, p_surf_taper=(85000.0, 95000.0),
+                   p_strat_taper=(10000.0, 5000.0)):
+    """Per-level taper mu(p) in [0,1] (Palmer: zero near surface & stratosphere)."""
+    lnps_ref = jnp.log(jnp.full((bundle.trans_config.L, 2 * bundle.trans_config.L - 1), 1e5))
+    prs = compute_pressure_diagnostics(lnps_ref, bundle.dyn_config).prs  # (n_lev,lat,lon)
+    p = prs[:, 0, 0]                                                     # column (n_lev,)
+    surf = _ramp(p, p_surf_taper[1], p_surf_taper[0])   # 0 at 950 hPa -> 1 at 850 hPa
+    strat = _ramp(p, p_strat_taper[1], p_strat_taper[0])  # 0 at 50 hPa -> 1 at 100 hPa
+    return surf * strat
+
+
+def apply_sppt(phys_tends, r_grid, mu, params):
+    """Xp = (1 + clip(mu*r, -0.9, 0.9)) * Xc for X in {u, v, virtual_temperature}."""
+    sigma = jnp.exp(params.log_sigma)
+    r_clipped = jnp.clip(r_grid, -3.0 * sigma, 3.0 * sigma)             # +-3 sigma bound
+    factor = 1.0 + jnp.clip(mu[:, None, None] * r_clipped[None, :, :], -0.9, 0.9)
+    return PhysicsTendencies(
+        u=phys_tends.u * factor,
+        v=phys_tends.v * factor,
+        virtual_temperature=phys_tends.virtual_temperature * factor,
+        log_surface_pressure=phys_tends.log_surface_pressure,
+        tracers=phys_tends.tracers,
+    )
