@@ -1,15 +1,22 @@
 """Generate identical-twin truth datasets (Mode A recovery / Mode B model-error)."""
 import os
 
-# Entry-point float64 guard (plan global constraint): must precede any jax import.
-# setdefault so a cluster/env that already set these (e.g. JAX_PLATFORMS=cuda) wins.
-os.environ.setdefault("JAX_ENABLE_X64", "True")
+# Float64 is REQUIRED for this pipeline (float32 silently corrupts the data).
+# Enforce it authoritatively: set the env var before jax is imported, and also
+# call jax.config.update after import in case jax was already imported by a caller.
+# Additionally pin the platform to CPU unless the caller already chose one: on
+# Apple Silicon jax defaults to the Metal backend, which CANNOT do float64 and
+# crashes; a cluster exporting JAX_PLATFORMS=cuda still wins (setdefault).
+os.environ["JAX_ENABLE_X64"] = "True"
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import argparse
 import pickle
 
 import jax
 import jax.numpy as jnp
+
+jax.config.update("jax_enable_x64", True)
 
 from gfs_dynamical_core.jax.states import SpectralState
 from gfs_dynamical_core.jax.transforms import spectral_to_grid

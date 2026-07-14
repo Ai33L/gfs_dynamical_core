@@ -89,3 +89,9 @@ debug_data/
 .DS_Store
 graphify-out/
 gfs_dynamical_core/_lib/shtns-2.7-r557/
+
+# SPPT pipeline generated datasets / trained params (large binaries)
+data/
+*.pkl
+sppt_checkpoints/
+sppt_analysis*/
