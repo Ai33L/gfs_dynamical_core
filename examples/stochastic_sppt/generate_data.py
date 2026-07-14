@@ -1,4 +1,10 @@
 """Generate identical-twin truth datasets (Mode A recovery / Mode B model-error)."""
+import os
+
+# Entry-point float64 guard (plan global constraint): must precede any jax import.
+# setdefault so a cluster/env that already set these (e.g. JAX_PLATFORMS=cuda) wins.
+os.environ.setdefault("JAX_ENABLE_X64", "True")
+
 import argparse
 import pickle
 
