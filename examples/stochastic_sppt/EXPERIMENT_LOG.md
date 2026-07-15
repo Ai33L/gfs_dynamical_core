@@ -156,4 +156,28 @@ correlation length ℓ.
 - **Why.** Separates the two failure modes: lower lr fixes overshoot; more cases
   reduces bias. A clean plateau near 0.5 is the convincing M1 evidence.
 
+### 2026-07-15 — M1 CONFIRMED: clean σ convergence at T21 (with a finite-sample bias note)
+- **Result.** The refined run (lr=0.03, 4 members × batch 3, 12 cases) recovered σ
+  along a smooth, decelerating, **monotonic** curve: 0.20 → crosses true 0.5 near
+  step 38 → **plateaus at ~0.523** (last-10 mean 0.523). No overshoot. This is
+  the clean M1 evidence; **parameter recovery works.**
+- **Residual bias ≈ +0.023 (~5%).** σ settles slightly *above* 0.5, as predicted:
+  Mode-A "truth" is a *single* stochastic draw per case, so with a finite number
+  of cases the afCRPS-minimizing σ is biased a touch high (spread inflated to
+  cover outlier truth draws). This is a **sampling** property, not a bug; it
+  shrinks with more cases. We accept it as within-tolerance for M1.
+- **On the learning rate.** lr=0.1 overshot to 0.73 (momentum); lr=0.03 converges
+  cleanly. The two knobs are orthogonal: lr controls overshoot, #cases controls
+  the residual bias.
+- **Loss curve is batch-stochastic.** Per-step loss wobbles ~0.08–0.115 because
+  each step scores a *different* random 3-case batch with fresh noise — it is not
+  a smooth descent and should not be read as one. The parameter trajectory (not
+  the raw loss) is the convergence signal here.
+- **Operational lesson.** Long background jobs on this setup were killed near
+  ~35–40 min (cause uncertain — RSS stayed flat at ~3.3 GB, so NOT OOM; and a
+  separate 1 h 43 m forward job *did* finish, so it is not a hard wall-clock
+  cap). Mitigation adopted: **checkpoint every unit of work to disk** (per-step
+  trajectory here) so a kill never loses progress, and keep individual runs
+  short/resumable. Each T21 grad step ran ~40 s at 12 vmap lanes.
+
 *(entries continue as the experiment proceeds)*
