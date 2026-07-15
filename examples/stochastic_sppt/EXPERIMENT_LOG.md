@@ -180,4 +180,40 @@ correlation length ℓ.
   trajectory here) so a kill never loses progress, and keep individual runs
   short/resumable. Each T21 grad step ran ~40 s at 12 vmap lanes.
 
+### 2026-07-15 — Operational: run JAX in the FOREGROUND here (background jobs get killed)
+- **Finding.** Long-running *background* jobs on this machine were repeatedly
+  killed — sometimes near ~40 min, later within seconds (even during import) —
+  while **memory was healthy** (47–49% free, no lingering processes, RSS ~1–3 GB).
+  So it is **not** OOM and not a local resource limit; the environment's
+  background runner terminates them. The identical job run in the **foreground**
+  completed cleanly (EXIT 0, 1.2 GB).
+- **Practice adopted.** Run JAX compute in the **foreground** with a bounded
+  per-run scope (fits the tool's ~10 min window), and **checkpoint every unit of
+  work to disk** (per-step trajectory, per-case ensembles) so any interruption is
+  resumable. Split heavy compute from fast plotting (do plots in pure numpy).
+- **Consequence.** The **T42 forward diagnostic was abandoned on this machine** —
+  compiling/running the large T42 forward ensemble graph inside a background job
+  was killed 3× before producing a case. We do the calibration diagnostics at
+  **T21** instead (below). T42 diagnostics belong on a GPU/cluster.
+
+### 2026-07-15 — M1 supplementary check: the recovered σ yields a calibrated ensemble (T21)
+- **Setup.** Forward-only ensembles (no gradient) at the **recovered σ = 0.523**
+  (τ, ℓ at truth), on a fresh T21 identical-twin Mode-A dataset (truth =
+  default_params), leads 3 & 5 days, 3 cases × 8 members. Diagnostics pooled over
+  cases × grid.
+- **Result — calibrated.**
+  - **Spread–error ratio ≈ 1** for all five fields at both leads (range
+    0.96–1.09; target 1). Neither over- nor under-dispersed.
+  - **Rank histogram (t500, 5 d) ≈ flat** (bins 553–751 vs uniform 672) — truth
+    occupies uniformly-distributed ranks, the calibration signature.
+  - **Truth anomaly distribution overlays the member distribution** — the truth
+    looks like a draw from the ensemble.
+- **Interpretation.** M1 is confirmed on two fronts: (1) parameter *recovery*
+  (σ: 0.2 → ~0.52, plateaued) and (2) the recovered σ produces a *calibrated*
+  ensemble. The tiny residual (u850 spread-error ~1.08, t500 ~0.96) is consistent
+  with σ landing ~5% above 0.5 (the finite-sample bias noted earlier).
+- **Caveat.** The `afCRPS-vs-lead` panel was plotted unnormalized, so surface
+  pressure (Pa) dominates it visually; the per-field-std normalization used in
+  the training loss is the right scaling for cross-field comparison.
+
 *(entries continue as the experiment proceeds)*
