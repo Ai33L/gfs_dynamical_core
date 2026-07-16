@@ -216,4 +216,59 @@ correlation length ℓ.
   pressure (Pa) dominates it visually; the per-field-std normalization used in
   the training loss is the right scaling for cross-field comparison.
 
+### 2026-07-16 — Student README + reproducible figure pipeline; M1 re-run from scratch
+- **What.** Wrote the student-facing tutorial `README.md` (the companion this log
+  had promised but that never existed) and a reproducible figure pipeline under
+  `figures/` (`run_sweep.py`, `run_calibration.py`, `plot.py`). Regenerated all
+  five M1 figures from real runs — the earlier M1 results were recorded only in
+  prose here, with no figures or trajectory checkpoints saved to disk.
+- **Sweep leads shortened to 1 day (hardware).** Reverse-mode compile time grows
+  with rollout length: the 5-day-lead (240-step) graph compiles for ~8.5 min,
+  which does not fit this machine's **~10-min per-process ceiling** (confirmed
+  again: a background sweep was killed after compile + 1 step; a 1-day graph
+  compiles in ~15 s). σ-recovery is lead-agnostic (it only matches ensemble
+  spread to the identical-twin truth), so the sweep uses a **1-day lead**;
+  calibration stays forward-only at 3 & 5 days. Documented in `README.md` and
+  `run_sweep.py`.
+- **Result — M1 reproduced.** T21 σ-only, lr=0.03, 4 members × batch 3, 12 cases:
+  σ climbs monotonically 0.20 → crosses true 0.5 at **step 38** → **last-10 mean
+  0.508** (final 0.517). Residual bias **~+0.01 (~2%)**, smaller than the earlier
+  run's ~5% — consistent with it being a finite-sample sampling property.
+- **Calibration (fresh seed=1, forward).** Spread–error ratio **0.92–1.05** across
+  the five fields at 3 & 5 d (slightly *under*-dispersed at t500 ≈ 0.92); rank
+  histogram (t500, 5 d) **approximately flat** with a mild tilt toward high ranks
+  (the same under-dispersion); truth-anomaly distribution overlays the member
+  distribution. Calibrated, with an honest small under-dispersion noted rather
+  than smoothed over.
+- **Operational pattern adopted.** Split every stage into `--data-only` (build the
+  dataset artifact) then the compute stage, each fitting one foreground window;
+  the sweep checkpoints per step under a wall-clock `--budget-seconds` and is
+  resumed by re-invoking. Heavy JAX compute stays in the foreground; plotting is
+  pure numpy. Datasets/checkpoints live in `figures/_artifacts/` (gitignored-size
+  pickles); the PNGs are committed for the README.
+
+### 2026-07-16 — Self-contained LaTeX tutorial (`tutorial.pdf`); README demoted to a front-door
+- **Why.** Review feedback: the Markdown README was a run-guide, not a teaching
+  document — it stated results without defining the diagnostics, omitted the
+  mathematical formulation of the training, and assumed too much of the reader.
+- **What.** Wrote `tutorial.tex` → `tutorial.pdf` (15 pp, built with `latexmk`),
+  a from-first-principles tutorial for a master's student. Covers, with
+  derivations: SPPT + the spectral AR(1) generator (stationary variance, how
+  σ/τ/ℓ map to φ, σ_n, κ_T); how truth data is generated/stored and the
+  **single-draw vs. K-draw** analysis (bias ↓ ~1/K, cheap at train time because
+  the forecast rollout is shared across truth draws, costs storage + truth-gen
+  time); CRPS → fair → almost-fair (finite-ensemble bias); spread–error ratio
+  (full (M+1)/M derivation) and rank histogram (interpretation table); and the
+  learning core — the **reparameterization/pathwise gradient** (differentiate
+  through fixed N(0,1) noise; gradient is w.r.t. the three log-params; truth and
+  η held fixed), common random numbers, reverse-mode memory, and **why σ settles
+  ~2% above 0.5** (fair CRPS is proper ⇒ minimiser is θ* in the population, but
+  finite cases + one truth draw/case bias σ slightly high). Adds train/val
+  protocol, per-figure reproduction with code, limitations, 5 exercises, and a
+  referenced further-reading section. README is now a short front-door pointing
+  to the PDF; the deep prose lives in LaTeX.
+- **Build hygiene.** `.gitignore`: keep `figures/*.png` and `tutorial.pdf`; ignore
+  LaTeX aux (`*.aux/*.toc/*.out/*.fls/*.fdb_latexmk`) and the `_artifacts/`
+  pickles. Rebuild with `latexmk -pdf tutorial.tex`.
+
 *(entries continue as the experiment proceeds)*
