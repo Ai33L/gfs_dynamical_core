@@ -1,4 +1,5 @@
 """Almost-fair CRPS (Lang et al. 2024) and ensemble-calibration diagnostics."""
+import jax
 import jax.numpy as jnp
 
 
@@ -11,6 +12,15 @@ def afcrps(ensemble, truth, alpha=0.95):
     diff = jnp.abs(ensemble[:, None] - ensemble[None, :])   # (M, M, ...)
     e2 = jnp.sum(diff, axis=(0, 1)) / (2.0 * M * (M - 1))
     return jnp.mean(e1 - (1.0 - eps) * e2)
+
+
+def afcrps_multidraw(ensemble, truths, alpha=0.95):
+    """Mean almost-fair CRPS of one ensemble against K independent truth draws.
+
+    ensemble: (M, ...), truths: (K, ...). Averages afcrps over the K draws that
+    share the single forecast ensemble — the expensive rollout is not repeated
+    per draw, only the cheap |ensemble - truth| term is."""
+    return jnp.mean(jax.vmap(lambda t: afcrps(ensemble, t, alpha))(truths))
 
 
 def fair_crps(ensemble, truth):
