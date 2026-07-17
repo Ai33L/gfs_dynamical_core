@@ -30,3 +30,19 @@ def test_mode_b_truncates_truth_to_forecast_grid():
     # forecast grid is T21 -> n_lat=32, n_lon=63
     assert data["truth"]["ps"].shape[-2:] == (32, 63)
     assert data["ic_specs"].temperature.shape[-2:] == (32, 63)
+
+
+def test_mode_a_multidraw_shapes():
+    from examples.stochastic_sppt import sppt
+    exp = ExperimentConfig(
+        mode="A", forecast_resolution="T21", truth_resolution="T21",
+        n_members=2, lead_days=(1,), n_cases=2, spinup_days=1.0,
+        case_stride_days=1.0, n_draws=3, seed=0,
+    )
+    data = generate_data.mode_a_dataset_multidraw(exp, sppt.default_params())
+    # truth: (n_cases, n_draws, n_leads, lat, lon)
+    assert data["truth"]["t500"].shape == (2, 3, 1, 32, 63)
+    assert data["forecast_resolution"] == "T21"
+    # ic_specs batched over the 2 cases
+    assert data["ic_specs"].temperature.shape[0] == 2
+    assert set(data["truth"]) == {"u850", "v850", "t500", "vort500", "ps"}

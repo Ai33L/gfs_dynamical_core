@@ -26,6 +26,7 @@ from .config import ExperimentConfig, ModelConfig
 from .diagnostics import extract_fields
 from .held_suarez import hs_tendencies
 from .model import build_model, rest_state, spectral_truncate, step
+from .rollout import ensemble_rollout
 
 _FIELDS = ("u850", "v850", "t500", "vort500", "ps")
 
@@ -140,6 +141,40 @@ def _pack(ic_specs, truth, exp, bundle):
     return {
         "ic_specs": _stack_specs(ic_specs),
         "truth": {k: jnp.stack(v) for k, v in truth.items()},   # (n_case,n_lead,lat,lon)
+        "lead_steps": _lead_steps(exp, bundle),
+        "forecast_resolution": exp.forecast_resolution,
+        "n_lev": bundle.n_lev,
+    }
+
+
+def mode_a_dataset_multidraw(exp: ExperimentConfig, true_params):
+    """Mode-A truth with K stochastic trajectories per IC (truth K-draw).
+
+    Reuses `ensemble_rollout` to draw `exp.n_draws` truth trajectories from each
+    sampled IC, so the truth carries the AR(1) SPPT pattern continuously across
+    lead boundaries (the more correct behaviour vs. `mode_a_dataset`, which
+    re-initialises the pattern at each lead). truth[field] has an extra draw axis.
+    """
+    bundle = build_model(ModelConfig(resolution=exp.forecast_resolution))
+    key = jax.random.PRNGKey(exp.seed)
+    lead_steps = _lead_steps(exp, bundle)
+
+    case_ics = _sample_case_ics(bundle, key, exp)
+    ic_specs, truth = [], {k: [] for k in _FIELDS}
+    for i, ic in enumerate(case_ics):
+        ic_specs.append(ic)
+        draw_keys = jax.random.split(jax.random.fold_in(key, 1000 + i), exp.n_draws)
+        ens = ensemble_rollout(true_params, ic, draw_keys, bundle, lead_steps)
+        for k in _FIELDS:
+            truth[k].append(ens[k])   # (n_draws, n_lead, lat, lon)
+    return _pack_multidraw(ic_specs, truth, exp, bundle)
+
+
+def _pack_multidraw(ic_specs, truth, exp, bundle):
+    return {
+        "ic_specs": _stack_specs(ic_specs),
+        # (n_case, n_draws, n_lead, lat, lon)
+        "truth": {k: jnp.stack(v) for k, v in truth.items()},
         "lead_steps": _lead_steps(exp, bundle),
         "forecast_resolution": exp.forecast_resolution,
         "n_lev": bundle.n_lev,
