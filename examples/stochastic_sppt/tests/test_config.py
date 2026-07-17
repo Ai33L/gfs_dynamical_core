@@ -16,3 +16,11 @@ def test_experiment_and_train_defaults():
     assert ec.n_members >= 2 and ec.lead_days[-1] == 10
     tc = TrainConfig()
     assert 0.0 < tc.alpha <= 1.0
+
+
+def test_experiment_config_has_n_draws_default_one():
+    ec = ExperimentConfig(mode="A", forecast_resolution="T21", truth_resolution="T21")
+    assert ec.n_draws == 1
+    ec2 = ExperimentConfig(mode="A", forecast_resolution="T21", truth_resolution="T21",
+                           n_draws=32)
+    assert ec2.n_draws == 32

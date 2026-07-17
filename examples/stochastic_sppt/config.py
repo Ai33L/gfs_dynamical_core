@@ -40,6 +40,7 @@ class ExperimentConfig:
     spinup_days: float = 200.0
     case_stride_days: float = 5.0
     ic_perturb_amp: float = 0.0     # 0 => SPPT-only spread
+    n_draws: int = 1                # K: truth trajectories per IC (Mode-A K-draw)
     seed: int = 0
 
 
