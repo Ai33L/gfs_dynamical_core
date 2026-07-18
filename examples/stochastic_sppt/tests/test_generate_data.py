@@ -46,3 +46,9 @@ def test_mode_a_multidraw_shapes():
     # ic_specs batched over the 2 cases
     assert data["ic_specs"].temperature.shape[0] == 2
     assert set(data["truth"]) == {"u850", "v850", "t500", "vort500", "ps"}
+    # The K draws must be DISTINCT stochastic trajectories (independent SPPT
+    # noise per draw): a key-reuse bug would collapse them to identical copies
+    # -- shape-correct but effectively 1 draw, silently defeating the whole
+    # point of K-draw truth. Assert draw 0 and draw 1 of case 0 differ.
+    d0, d1 = data["truth"]["t500"][0, 0], data["truth"]["t500"][0, 1]
+    assert not jnp.allclose(d0, d1)

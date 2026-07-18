@@ -84,9 +84,46 @@ def _sigma_only(grads):
                          log_len=jnp.zeros_like(grads.log_len))
 
 
+def _dataset_sig(a):
+    """Config keys that determine the dataset content (T21 and seed 0 are constants)."""
+    return {"cases": a.cases, "draws": a.draws,
+            "lead_days": a.lead_days, "spinup_days": a.spinup_days}
+
+
+def _train_sig(a):
+    """Config keys that determine the optimization trajectory (a resume must match
+    all of these, plus the dataset it was trained against)."""
+    return {"lr": a.lr, "alpha": a.alpha, "batch": a.batch, "members": a.members,
+            "init_sigma": a.init_sigma, "dataset": _dataset_sig(a)}
+
+
+def _check_sig(kind, stored, want, path):
+    """Guard cached-artifact reuse against a config change.
+
+    Reusing a dataset/checkpoint that was built under different CLI args silently
+    trains on the wrong config -- a foot-gun, since the artifacts are reused on
+    mere existence. If the stored signature differs from the requested one, refuse
+    and tell the user to delete the stale artifact. A missing signature (an
+    artifact built before this guard existed) is reused with a warning."""
+    if stored is None:
+        print(f"WARNING: cached {kind} {path.name} has no config signature "
+              f"(built before the guard) -- reusing without verification.")
+        return
+    if stored != want:
+        diffs = {k: (stored.get(k), want.get(k)) for k in set(stored) | set(want)
+                 if stored.get(k) != want.get(k)}
+        raise RuntimeError(
+            f"cached {kind} {path.name} was built with a different config "
+            f"(stored -> requested: {diffs}). Delete it to rebuild, or pass "
+            f"matching args.")
+
+
 def ensure_dataset(a):
+    want = _dataset_sig(a)
     if DATASET.exists():
-        return load_dataset(DATASET)
+        data = load_dataset(DATASET)
+        _check_sig("dataset", data.get("_sig"), want, DATASET)
+        return data
     print(f"generating T21 K-draw dataset ({a.cases} cases x {a.draws} draws) -> {DATASET.name}")
     exp = ExperimentConfig(mode="A", forecast_resolution="T21", truth_resolution="T21",
                            n_members=a.members, lead_days=(a.lead_days,), n_cases=a.cases,
@@ -94,6 +131,7 @@ def ensure_dataset(a):
                            n_draws=a.draws, seed=0)
     t0 = time.time()
     data = mode_a_dataset_multidraw(exp, sppt.default_params())
+    data["_sig"] = want
     save_dataset(DATASET, data)
     print(f"  dataset ready ({time.time() - t0:.0f}s)")
     return data
@@ -131,10 +169,12 @@ def main(argv=None):
     opt = optax.adam(a.lr)
     base_key = jax.random.PRNGKey(0)
     grad_fn = jax.jit(jax.value_and_grad(multidraw_loss_fn), static_argnums=(5, 7, 9))
+    train_sig = _train_sig(a)
 
     if CKPT.exists():
         with open(CKPT, "rb") as f:
             ck = pickle.load(f)
+        _check_sig("checkpoint", ck.get("_sig"), train_sig, CKPT)
         params, opt_state, history, start = (ck["params"], ck["opt_state"],
                                              ck["history"], ck["step"])
         print(f"resuming from step {start} (sigma={float(jnp.exp(params.log_sigma)):.4f})")
@@ -160,7 +200,8 @@ def main(argv=None):
                         "sigma": float(jnp.exp(params.log_sigma))})
         with open(CKPT, "wb") as f:
             pickle.dump({"step": step, "params": jax.device_get(params),
-                         "opt_state": jax.device_get(opt_state), "history": history}, f)
+                         "opt_state": jax.device_get(opt_state), "history": history,
+                         "_sig": train_sig}, f)
         el = time.time() - t_start
         print(f"step {step:3d}  afCRPS {float(loss):.5f}  sigma {history[-1]['sigma']:.4f}"
               f"  [{el:.0f}s]", flush=True)
