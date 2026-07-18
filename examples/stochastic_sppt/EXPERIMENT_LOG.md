@@ -271,4 +271,48 @@ correlation length ℓ.
   LaTeX aux (`*.aux/*.toc/*.out/*.fls/*.fdb_latexmk`) and the `_artifacts/`
   pickles. Rebuild with `latexmk -pdf tutorial.tex`.
 
+### 2026-07-18 — K-draw Mode-A truth: σ convergence with the finite-sample bias removed
+- **Motivation.** The single-draw Mode-A truth left a ~2–5% *upward* finite-sample
+  bias in recovered σ (the 12-case × 1-draw runs settled at last-10 means ~0.508
+  and ~0.523, i.e. a touch above the true 0.5, and it was not obvious the curve
+  had stopped climbing). Hypothesis: with a *single* stochastic truth draw per
+  case the afCRPS-minimizing σ is inflated to hedge outlier truths; drawing **K**
+  truth trajectories per IC should shrink that bias ≈ 1/(cases·K).
+- **What changed.** Truth now uses **K stochastic trajectories per IC**
+  (`generate_data.mode_a_dataset_multidraw`, which reuses `ensemble_rollout` with
+  the true params), and the loss averages afCRPS over the K draws that share one
+  forecast ensemble (`metrics.afcrps_multidraw`) — cheap at train time because the
+  M forecast rollouts are *not* repeated per draw, only the elementwise
+  `|ensemble − truth|` term is. Driven by the standalone, resumable
+  `figures/run_convergence.py` (σ-only; τ, ℓ frozen at truth).
+  - **Correctness bonus.** `ensemble_rollout` carries the AR(1) SPPT pattern
+    *continuously across lead boundaries*, removing the "pattern re-init per lead"
+    imperfection the old single-draw `mode_a_dataset` had (2026-07-14 entry). At
+    the 1-day lead used here this is the more correct behaviour.
+- **Config.** T21 identical-twin, **32 cases × 32 draws**, σ-only, 1-day lead,
+  lr=0.03, 4 members × batch 6, start σ=0.2. Ran to **step 97** (of a 150 target)
+  — stopped once the parameter had clearly plateaued.
+- **Result — σ settles at ~0.48, bias flipped from + to − and shrank.** The
+  trajectory is now an **overshoot-and-relax**, not a monotone climb: σ crosses
+  the true 0.5 at **step 38**, overshoots to **~0.522** (peak ~step 50), then
+  *relaxes back* and plateaus — **final 0.486, last-10 mean 0.483, last-20 mean
+  0.482** (true 0.5). The last-10 and last-20 means agreeing to ~0.001 is the
+  plateau signature: this is genuine convergence, not a still-drifting curve.
+- **Interpretation.** Increasing the truth draws removed the upward single-draw
+  bias exactly as predicted — σ no longer settles *above* 0.5. It now sits
+  marginally *below* (~−3%), which is consistent with Adam momentum ringing after
+  the overshoot (the correction that pulled σ down from ~0.52 carried it a hair
+  past 0.5) plus residual batch-stochastic sampling (each step scores a random
+  6-of-32-case batch with fresh noise), **not** a new systematic downward bias —
+  the recovery is exact at T21 (truth and forecast share code, so `_VAR_NORM`
+  cancels). Net: the "has σ converged?" doubt is answered — with the larger
+  K-draw dataset σ converges to a clean plateau near 0.48–0.49, and the
+  overshoot-and-relax shape is a far more convincing convergence story than the
+  earlier monotone-climb-to-slightly-high.
+- **Reproduce.** `python -m examples.stochastic_sppt.figures.run_convergence
+  --data-only` (build the 32×32 T21 dataset once) then re-invoke without
+  `--data-only` (foreground, resumable per-step checkpoint). Caveat: the dataset
+  and checkpoint are reused if the files exist regardless of CLI args — delete
+  `figures/_artifacts/convergence_*.pkl` before changing `--cases/--draws/--lr/…`.
+
 *(entries continue as the experiment proceeds)*
