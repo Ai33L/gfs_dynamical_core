@@ -125,6 +125,15 @@ This task introduces the differentiable core. `PhysicsTendencies` carries
 grid-space jnp tendencies; `advance_with_tendencies` runs the dynamics step
 then applies a time-split spectral increment built from those tendencies.
 
+**Dual tendency path (design §5):** `advance_with_tendencies` accepts BOTH a
+grid-space `PhysicsTendencies` container (`phys_tends`, transformed to spectral
+internally) AND an optional spectral-space `SpectralTendencies` container
+(`spec_tends`, added directly with no transform). Either may be `None`. The
+spectral path is the injection point for stochastic / spectral-native
+components — notably SKEB (kinetic-energy backscatter on the vorticity
+tendency) and trainable SPPT — which generate their perturbations natively in
+spectral space. `SpectralTendencies` already exists in `states.py`; reuse it.
+
 - [ ] **Step 1: Write the failing test**
 
 ```python
@@ -269,33 +278,151 @@ def _physics_tendencies_to_spectral(tends, trans_config, dyn_config):
 def advance_with_tendencies(
     spec_state, phys_tends, phis_grads, dyn_config, trans_config,
     stepper_config, latitudes, gauss_weights=None, pdryini=None,
+    spec_tends=None,
 ):
     """Differentiable: dynamics step + time-split physics increment.
 
-    Pure jnp; jit/grad/vmap-able. ``phys_tends`` may be ``None`` for a
-    dynamics-only step.
+    Pure jnp; jit/grad/vmap-able. Applies a single time-split increment
+    assembled from two independent tendency containers, either of which may
+    be ``None``:
+
+    * ``phys_tends`` : grid-space ``PhysicsTendencies`` — transformed to
+      spectral internally (u, v -> vort/div; rest via ``s2_forward``).
+    * ``spec_tends`` : spectral-space ``SpectralTendencies`` — added directly,
+      no transform. This is the SKEB / SPPT injection point.
+
+    With both ``None`` this is a dynamics-only step identical to ``advance``.
     """
     spec_new = advance(
         spec_state, phis_grads, dyn_config, trans_config, stepper_config,
         latitudes, gauss_weights, pdryini,
     )
-    if phys_tends is None:
+    if phys_tends is None and spec_tends is None:
         return spec_new
     dt = stepper_config.dt
-    vort_t, div_t, temp_t, lnps_t, tracer_t = _physics_tendencies_to_spectral(
-        phys_tends, trans_config, dyn_config
-    )
+
+    # Accumulate the spectral increment from the grid path (if any)...
+    vort_i = jnp.zeros_like(spec_new.vorticity)
+    div_i = jnp.zeros_like(spec_new.divergence)
+    temp_i = jnp.zeros_like(spec_new.temperature)
+    lnps_i = jnp.zeros_like(spec_new.log_surface_pressure)
+    tracer_i = jnp.zeros_like(spec_new.tracers)
+
+    if phys_tends is not None:
+        vort_t, div_t, temp_t, lnps_t, tracer_t = _physics_tendencies_to_spectral(
+            phys_tends, trans_config, dyn_config
+        )
+        vort_i += vort_t
+        div_i += div_t
+        temp_i += temp_t
+        lnps_i += lnps_t
+        tracer_i += tracer_t
+
+    # ...and add the spectral path directly (no grid->spectral transform).
+    if spec_tends is not None:
+        vort_i += spec_tends.d_vorticity_d_t
+        div_i += spec_tends.d_divergence_d_t
+        temp_i += spec_tends.d_temperature_d_t
+        lnps_i += spec_tends.d_log_surface_pressure_d_t
+        tracer_i += spec_tends.d_tracers_d_t
+
     return SpectralState(
-        vorticity=spec_new.vorticity + dt * vort_t,
-        divergence=spec_new.divergence + dt * div_t,
-        temperature=spec_new.temperature + dt * temp_t,
-        log_surface_pressure=spec_new.log_surface_pressure + dt * lnps_t,
-        tracers=spec_new.tracers + dt * tracer_t,
+        vorticity=spec_new.vorticity + dt * vort_i,
+        divergence=spec_new.divergence + dt * div_i,
+        temperature=spec_new.temperature + dt * temp_i,
+        log_surface_pressure=spec_new.log_surface_pressure + dt * lnps_i,
+        tracers=spec_new.tracers + dt * tracer_i,
     )
 ```
 
-Confirm `SpectralState` is already imported at the top of `stepper.py` (it is:
-`from .states import SpectralState, SpectralTendencies`).
+Confirm `SpectralState` and `SpectralTendencies` are already imported at the
+top of `stepper.py` (they are:
+`from .states import SpectralState, SpectralTendencies`). The caller builds
+`spec_tends` from the existing `SpectralTendencies` struct; unused fields are
+zero arrays of the matching spectral shape.
+
+- [ ] **Step 4b: Add a spectral-tendency injection + composition test**
+
+```python
+# tests/test_jax_component_api.py (add to file)
+from gfs_dynamical_core.jax.states import SpectralTendencies
+
+
+def _zero_spec_tends(n_lev, L, n_tracers=1):
+    z = lambda: jnp.zeros((n_lev, L, 2 * L - 1), dtype=jnp.complex128)
+    return SpectralTendencies(
+        d_vorticity_d_t=z(), d_divergence_d_t=z(), d_temperature_d_t=z(),
+        d_log_surface_pressure_d_t=jnp.zeros((L, 2 * L - 1), dtype=jnp.complex128),
+        d_tracers_d_t=jnp.zeros((n_tracers, n_lev, L, 2 * L - 1), dtype=jnp.complex128),
+    )
+
+
+def test_spectral_vorticity_tendency_applied_directly():
+    """A spectral vorticity tendency is added as spec_new.vorticity + dt*tend,
+    with no grid round-trip (the SKEB injection path)."""
+    L, n_lev = 8, 10
+    dyn = _mock_dyn_config(n_lev)
+    trans = TransformConfig(L=L, radius=1.0)
+    sc = StepperConfig(dt=10.0, explicit=True)
+    lat = get_gaussian_latitudes(L)
+    n_lat, n_lon = trans.n_lat, trans.n_lon
+    phis = (jnp.zeros((n_lat, n_lon)), jnp.zeros((n_lat, n_lon)))
+    state = _mock_state(n_lev, L)
+
+    base = advance(state, phis, dyn, trans, sc, lat)
+    dvort = _zero_spec_tends(n_lev, L)
+    bump = jnp.zeros((n_lev, L, 2 * L - 1), dtype=jnp.complex128).at[:, 2, L].set(0.3)
+    dvort = dvort.replace(d_vorticity_d_t=bump)
+
+    out = advance_with_tendencies(
+        state, None, phis, dyn, trans, sc, lat, spec_tends=dvort
+    )
+    assert jnp.allclose(out.vorticity, base.vorticity + sc.dt * bump)
+    assert jnp.allclose(out.divergence, base.divergence)
+
+
+def test_grid_and_spectral_paths_compose_additively():
+    """phys_tends + spec_tends == sum of each applied alone (minus one base)."""
+    L, n_lev = 8, 10
+    dyn = _mock_dyn_config(n_lev)
+    trans = TransformConfig(L=L, radius=1.0)
+    sc = StepperConfig(dt=10.0, explicit=True)
+    lat = get_gaussian_latitudes(L)
+    n_lat, n_lon = trans.n_lat, trans.n_lon
+    phis = (jnp.zeros((n_lat, n_lon)), jnp.zeros((n_lat, n_lon)))
+    state = _mock_state(n_lev, L)
+
+    grid_t = PhysicsTendencies(
+        u=0.01 * jnp.ones((n_lev, n_lat, n_lon)),
+        v=jnp.zeros((n_lev, n_lat, n_lon)),
+        virtual_temperature=jnp.zeros((n_lev, n_lat, n_lon)),
+        log_surface_pressure=jnp.zeros((n_lat, n_lon)),
+        tracers=jnp.zeros((1, n_lev, n_lat, n_lon)),
+    )
+    spec_t = _zero_spec_tends(n_lev, L).replace(
+        d_temperature_d_t=jnp.zeros((n_lev, L, 2 * L - 1), dtype=jnp.complex128)
+        .at[:, 1, L].set(0.2)
+    )
+
+    base = advance(state, phis, dyn, trans, sc, lat)
+    only_grid = advance_with_tendencies(state, grid_t, phis, dyn, trans, sc, lat)
+    only_spec = advance_with_tendencies(
+        state, None, phis, dyn, trans, sc, lat, spec_tends=spec_t
+    )
+    both = advance_with_tendencies(
+        state, grid_t, phis, dyn, trans, sc, lat, spec_tends=spec_t
+    )
+    # increments are additive about the common dynamics step
+    for f in ("vorticity", "divergence", "temperature",
+              "log_surface_pressure", "tracers"):
+        expected = (getattr(only_grid, f) + getattr(only_spec, f)
+                    - getattr(base, f))
+        assert jnp.allclose(getattr(both, f), expected)
+```
+
+Run both: `pytest tests/test_jax_component_api.py -k "spectral or compose" -v`
+Expected: PASS. (Task 3 adds the `jax.grad`-through-`spec_tends`
+differentiability check.)
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -340,6 +467,30 @@ def test_advance_with_tendencies_is_differentiable():
         )
         out = advance_with_tendencies(state, tends, phis, dyn, trans, sc, lat)
         return jnp.sum(jnp.abs(out.divergence) ** 2)
+
+    g = jax.grad(loss)(1.0)
+    assert jnp.isfinite(g)
+
+
+def test_advance_with_spectral_tendencies_is_differentiable():
+    """Gradients must flow through the spectral (spec_tends) injection path —
+    this is the path SKEB/SPPT train through."""
+    L, n_lev = 8, 10
+    dyn = _mock_dyn_config(n_lev)
+    trans = TransformConfig(L=L, radius=1.0)
+    sc = StepperConfig(dt=10.0, explicit=True)
+    lat = get_gaussian_latitudes(L)
+    n_lat, n_lon = trans.n_lat, trans.n_lon
+    phis = (jnp.zeros((n_lat, n_lon)), jnp.zeros((n_lat, n_lon)))
+    state = _mock_state(n_lev, L)
+
+    def loss(amp):
+        bump = jnp.zeros((n_lev, L, 2 * L - 1), dtype=jnp.complex128).at[:, 2, L].set(1.0)
+        spec_t = _zero_spec_tends(n_lev, L).replace(d_vorticity_d_t=amp * bump)
+        out = advance_with_tendencies(
+            state, None, phis, dyn, trans, sc, lat, spec_tends=spec_t
+        )
+        return jnp.sum(jnp.abs(out.vorticity) ** 2)
 
     g = jax.grad(loss)(1.0)
     assert jnp.isfinite(g)

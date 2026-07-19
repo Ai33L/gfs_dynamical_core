@@ -18,8 +18,6 @@ from sympl._core.tracers import reset_tracers, reset_packers
 from datetime import datetime, timedelta
 import climt
 
-os.environ["NUMBA_DISABLE_JIT"] = "1"
-
 vertical_dimension_names = ["interface_levels", "mid_levels", "full_levels"]
 
 cache_folder = os.path.join(

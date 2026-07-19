@@ -362,6 +362,121 @@ def init_diffusion_operators(
     )
 
 
+@struct.dataclass
+class PhysicsTendencies:
+    """Grid-space (bottom-to-top) physics tendencies, SI units.
+
+    u, v               : m s^-2
+    virtual_temperature: K s^-1   (already includes the moisture correction)
+    log_surface_pressure: s^-1    (i.e. (1/ps) * dps/dt)
+    tracers            : (n_tracers, n_lev, n_lat, n_lon) kg/kg s^-1
+    """
+    u: jnp.ndarray
+    v: jnp.ndarray
+    virtual_temperature: jnp.ndarray
+    log_surface_pressure: jnp.ndarray
+    tracers: jnp.ndarray
+
+
+def _physics_tendencies_to_spectral(tends, trans_config, dyn_config):
+    """Convert grid PhysicsTendencies to spectral increments (per-field)."""
+    from .transforms import (
+        s2_forward, enforce_triangular_truncation,
+    )
+    L = trans_config.L
+    sampling = trans_config.sampling
+    radius = dyn_config.radius
+    T = trans_config.truncation
+
+    l_arr = jnp.arange(L)
+    l_factor = jnp.sqrt(l_arr * (l_arr + 1))
+
+    def uv_to_vrtdiv(u, v):
+        F1 = s2_forward(-v + 1j * u, L, sampling, spin=1)
+        Fm1 = s2_forward(v + 1j * u, L, sampling, spin=-1)
+        rp = l_factor[:, None] * F1 / radius
+        rm = l_factor[:, None] * Fm1 / radius
+        return (rp - rm) / 2j, (rp + rm) / 2  # vort, div
+
+    vort_t, div_t = jax.vmap(uv_to_vrtdiv)(tends.u, tends.v)
+    temp_t = jax.vmap(lambda f: s2_forward(f, L, sampling))(
+        tends.virtual_temperature
+    )
+    lnps_t = s2_forward(tends.log_surface_pressure, L, sampling)
+    tracer_t = jax.vmap(
+        lambda field: jax.vmap(lambda f: s2_forward(f, L, sampling))(field)
+    )(tends.tracers)
+
+    vort_t = enforce_triangular_truncation(vort_t, L, T)
+    div_t = enforce_triangular_truncation(div_t, L, T)
+    temp_t = enforce_triangular_truncation(temp_t, L, T)
+    lnps_t = enforce_triangular_truncation(lnps_t, L, T)
+    tracer_t = jax.vmap(
+        lambda field: enforce_triangular_truncation(field, L, T)
+    )(tracer_t)
+    return vort_t, div_t, temp_t, lnps_t, tracer_t
+
+
+def advance_with_tendencies(
+    spec_state, phys_tends, phis_grads, dyn_config, trans_config,
+    stepper_config, latitudes, gauss_weights=None, pdryini=None,
+    spec_tends=None,
+):
+    """Differentiable: dynamics step + time-split physics increment.
+
+    Pure jnp; jit/grad/vmap-able. Applies a single time-split increment
+    assembled from two independent tendency containers, either of which may
+    be ``None``:
+
+    * ``phys_tends`` : grid-space ``PhysicsTendencies`` — transformed to
+      spectral internally (u, v -> vort/div; rest via ``s2_forward``).
+    * ``spec_tends`` : spectral-space ``SpectralTendencies`` — added directly,
+      no transform. This is the SKEB / SPPT injection point.
+
+    With both ``None`` this is a dynamics-only step identical to ``advance``.
+    """
+    spec_new = advance(
+        spec_state, phis_grads, dyn_config, trans_config, stepper_config,
+        latitudes, gauss_weights, pdryini,
+    )
+    if phys_tends is None and spec_tends is None:
+        return spec_new
+    dt = stepper_config.dt
+
+    # Accumulate the spectral increment from the grid path (if any)...
+    vort_i = jnp.zeros_like(spec_new.vorticity)
+    div_i = jnp.zeros_like(spec_new.divergence)
+    temp_i = jnp.zeros_like(spec_new.temperature)
+    lnps_i = jnp.zeros_like(spec_new.log_surface_pressure)
+    tracer_i = jnp.zeros_like(spec_new.tracers)
+
+    if phys_tends is not None:
+        vort_t, div_t, temp_t, lnps_t, tracer_t = _physics_tendencies_to_spectral(
+            phys_tends, trans_config, dyn_config
+        )
+        vort_i += vort_t
+        div_i += div_t
+        temp_i += temp_t
+        lnps_i += lnps_t
+        tracer_i += tracer_t
+
+    # ...and add the spectral path directly (no grid->spectral transform).
+    if spec_tends is not None:
+        vort_i += spec_tends.d_vorticity_d_t
+        div_i += spec_tends.d_divergence_d_t
+        temp_i += spec_tends.d_temperature_d_t
+        lnps_i += spec_tends.d_log_surface_pressure_d_t
+        tracer_i += spec_tends.d_tracers_d_t
+
+    return SpectralState(
+        vorticity=spec_new.vorticity + dt * vort_i,
+        divergence=spec_new.divergence + dt * div_i,
+        temperature=spec_new.temperature + dt * temp_i,
+        log_surface_pressure=spec_new.log_surface_pressure + dt * lnps_i,
+        tracers=spec_new.tracers + dt * tracer_i,
+    )
+
+
 def advance(
     state: SpectralState,
     phis_grads: tuple[jnp.ndarray, jnp.ndarray],

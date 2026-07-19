@@ -1,13 +1,23 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-from sympl import Stepper, get_constant
+from sympl import (
+    TendencyStepper,
+    get_constant,
+    get_tracer_names,
+    ImplicitTendencyComponentComposite,
+    get_numpy_arrays_with_properties,
+    restore_data_arrays_with_properties,
+)
 
-from .jax.dynamics import DynamicsConfig
+from ._property_utils import GFSError, get_valid_properties
+from .jax.dynamics import DynamicsConfig, compute_pressure_diagnostics
 from .jax.states import GridState
 from .jax.stepper import (
     StepperConfig,
     advance,
+    advance_with_tendencies,
+    PhysicsTendencies,
     init_diffusion_operators,
     init_semi_implicit_matrices,
 )
@@ -18,23 +28,25 @@ from .jax.transforms import (
     get_gaussian_latitudes,
     grid_to_spectral,
     spectral_to_grid,
+    enforce_triangular_truncation,
 )
 
 
-class GFSDynamicsJAX(Stepper):
+class GFSDynamicsJAX(TendencyStepper):
     """
-    JAX-based implementation of the GFS dynamical core.
+    JAX-based implementation of the GFS dynamical core (component-driven).
     """
 
-    input_properties = {
+    uses_tracers = True
+    tracer_dims = ("tracer", "mid_levels", "lat", "lon")
+    prepend_tracers = (("specific_humidity", "kg/kg"),)
+
+    # base (dynamics-only) property dicts; merged with component props in __init__
+    _gfs_input_properties = {
         "air_temperature": {"units": "K", "dims": ["mid_levels", "lat", "lon"]},
         "eastward_wind": {"units": "m s^-1", "dims": ["mid_levels", "lat", "lon"]},
         "northward_wind": {"units": "m s^-1", "dims": ["mid_levels", "lat", "lon"]},
         "surface_air_pressure": {"units": "Pa", "dims": ["lat", "lon"]},
-        "specific_humidity": {
-            "units": "kg kg^-1",
-            "dims": ["mid_levels", "lat", "lon"],
-        },
         "surface_geopotential": {"units": "m^2 s^-2", "dims": ["lat", "lon"]},
         "atmosphere_hybrid_sigma_pressure_a_coordinate_on_interface_levels": {
             "units": "dimensionless",
@@ -46,24 +58,96 @@ class GFSDynamicsJAX(Stepper):
             "dims": ["interface_levels"],
             "alias": "b_coord",
         },
+        "air_pressure": {"units": "Pa", "dims": ["mid_levels", "lat", "lon"]},
     }
 
-    output_properties = {
+    _gfs_output_properties = {
         "air_temperature": {"units": "K", "dims": ["mid_levels", "lat", "lon"]},
         "eastward_wind": {"units": "m s^-1", "dims": ["mid_levels", "lat", "lon"]},
         "northward_wind": {"units": "m s^-1", "dims": ["mid_levels", "lat", "lon"]},
         "surface_air_pressure": {"units": "Pa", "dims": ["lat", "lon"]},
-        "specific_humidity": {
-            "units": "kg kg^-1",
-            "dims": ["mid_levels", "lat", "lon"],
+        "air_pressure": {"units": "Pa", "dims": ["mid_levels", "lat", "lon"]},
+        "air_pressure_on_interface_levels": {
+            "units": "Pa",
+            "dims": ["interface_levels", "lat", "lon"],
         },
     }
 
-    diagnostic_properties = {}
+    _gfs_diagnostic_properties = {}
 
-    def __init__(self, adiabatic=False, **kwargs):
+    # Override TendencyStepper's abstract/computed properties so these can be
+    # set as plain instance attributes in __init__ (mirrors GFSDynamicalCore
+    # in component.py). Class-level values default to the base (no extra
+    # components) property dicts so that climt.get_default_state([cls], ...)
+    # works even when called with the class itself (not yet instantiated) —
+    # matches the convention used by climt TendencyComponents such as
+    # HeldSuarez, which expose input_properties as a class attribute.
+    # __init__ overwrites these with per-instance dicts merged with whatever
+    # tendency_component_list was passed in.
+    input_properties = _gfs_input_properties
+    output_properties = _gfs_output_properties
+    diagnostic_properties = _gfs_diagnostic_properties
+
+    @property
+    def spectral_names(self):
+        return (
+            "eastward_wind",
+            "northward_wind",
+            "air_temperature",
+            "surface_air_pressure",
+        ) + get_tracer_names()
+
+    def __init__(
+        self,
+        tendency_component_list=None,
+        adiabatic=False,
+        zero_negative_moisture=True,
+        **kwargs,
+    ):
+        tendency_component_list = tendency_component_list or []
+        self._tendency_component = ImplicitTendencyComponentComposite(
+            *tendency_component_list
+        )
+        bad = set(
+            self._tendency_component.diagnostic_properties.keys()
+        ).intersection(self.spectral_names)
+        if bad:
+            raise GFSError(
+                "Components may not emit {} as diagnostics; these are stepped "
+                "spectrally.".format(bad)
+            )
+
+        self.input_properties = dict(self._gfs_input_properties)
+        self.output_properties = dict(self._gfs_output_properties)
+        self.diagnostic_properties = dict(self._gfs_diagnostic_properties)
+
         super().__init__(**kwargs)
+
+        self.input_properties.update(
+            get_valid_properties(
+                self._gfs_input_properties,
+                self._tendency_component.input_properties,
+                "input",
+            )
+        )
+        self.output_properties.update(
+            get_valid_properties(
+                self._gfs_output_properties,
+                self._tendency_component.tendency_properties,
+                "output",
+            )
+        )
+        self.diagnostic_properties.update(
+            get_valid_properties(
+                self._gfs_diagnostic_properties,
+                self._tendency_component.diagnostic_properties,
+                "diagnostic",
+            )
+        )
+
         self.adiabatic = adiabatic
+        self._zero_negative_moisture = zero_negative_moisture
+        # ---- existing jnp-pipeline state (unchanged) ----
         self.dyn_config = None
         self.trans_config = None
         self.stepper_config = None
@@ -78,6 +162,10 @@ class GFSDynamicsJAX(Stepper):
         # (static fields marked pytree_node=False), so they trace cleanly.
         # First call compiles (~30 s); subsequent steps run fully fused.
         self._jit_advance = jax.jit(advance)
+        # Pure-function variant that also applies a time-split physics
+        # increment (grid-space PhysicsTendencies -> spectral) inside the
+        # same jit trace. Used whenever self._phys_tendencies is set.
+        self._jit_advance_t = jax.jit(advance_with_tendencies)
         # Cached spectral state: only do grid_to_spectral once (for the
         # initial condition).  After that, advance directly in spectral
         # space to avoid repeated grid→spectral→grid round-trip errors.
@@ -86,6 +174,12 @@ class GFSDynamicsJAX(Stepper):
         # time-split after the dynamics step — mirrors Fortran run.f90's
         # getphytend adjustment and the wrapper's assign_tendencies path.
         self._phys_tendencies = None
+
+    def _fvirt(self):
+        """(1 - Rd/Rv) / (Rd/Rv) — virtual-temperature moisture coefficient."""
+        rd = get_constant("gas_constant_of_dry_air", "J kg^-1 K^-1")
+        rv = get_constant("gas_constant_of_vapor_phase", "J kg^-1 K^-1")
+        return (1 - rd / rv) / (rd / rv)
 
     def set_physics_tendencies(self, u_tend=None, v_tend=None, t_tend=None):
         """Set grid-space physics tendencies (e.g. Held-Suarez forcing) to be
@@ -100,54 +194,73 @@ class GFSDynamicsJAX(Stepper):
         if u_tend is None and v_tend is None and t_tend is None:
             self._phys_tendencies = None
         else:
-            self._phys_tendencies = (
-                jnp.asarray(u_tend),
-                jnp.asarray(v_tend),
-                jnp.asarray(t_tend),
+            u_t = jnp.asarray(u_tend)
+            v_t = jnp.asarray(v_tend)
+            t_t = jnp.asarray(t_tend)
+            n_lev, n_lat, n_lon = t_t.shape
+            # Number of tracers must match the dynamical core's tracer stack
+            # (always >= 1: specific_humidity is prepended). Zero tendency
+            # for all of them since this legacy path only forces u/v/T.
+            n_tracers = len(self._tracer_packer.tracer_names)
+            self._phys_tendencies = PhysicsTendencies(
+                u=u_t,
+                v=v_t,
+                virtual_temperature=t_t,
+                log_surface_pressure=jnp.zeros((n_lat, n_lon)),
+                tracers=jnp.zeros((n_tracers, n_lev, n_lat, n_lon)),
             )
 
-    def _apply_physics_tendencies(self, spec_state, dt):
-        """Convert grid physics tendencies to spectral and apply time-split."""
-        from .jax.states import SpectralState
-        from .jax.transforms import enforce_triangular_truncation
+    def __call__(self, state, timestep):
+        """Fortran-style, component-driven step: gather physics tendencies
+        from ``self._tendency_component`` and route them through the pure
+        ``advance_with_tendencies`` alongside the dynamics step.
 
-        u_t, v_t, t_t = self._phys_tendencies
-        L = self.trans_config.L
-        sampling = self.trans_config.sampling
-        radius = self.dyn_config.radius
-        T = self.trans_config.truncation
+        Mirrors ``GFSDynamicalCore.__call__`` in component.py, simplified
+        since JAX handles its own internal sub-stepping (no air_pressure
+        consistency assertions needed here).
+        """
+        raw_state = get_numpy_arrays_with_properties(state, self.input_properties)
+        raw_state["tracers"] = self._tracer_packer.pack(state)
+        raw_state["time"] = state["time"]
 
-        l_arr = jnp.arange(L)
-        l_factor = jnp.sqrt(l_arr * (l_arr + 1))
+        tendencies, diagnostics = self._tendency_component(state, timestep)
+        for name, value in tendencies.items():
+            if name in self.input_properties:
+                tendencies[name] = value.to_units(
+                    self.input_properties[name]["units"] + " s^-1"
+                )
 
-        def uv_to_vrtdiv(u, v):
-            F1 = s2_forward(-v + 1j * u, L, sampling, spin=1)
-            Fm1 = s2_forward(v + 1j * u, L, sampling, spin=-1)
-            rp = l_factor[:, None] * F1 / radius
-            rm = l_factor[:, None] * Fm1 / radius
-            return (rp - rm) / 2j, (rp + rm) / 2  # vort, div
-
-        vort_t, div_t = jax.vmap(uv_to_vrtdiv)(u_t, v_t)
-        temp_t = jax.vmap(lambda f: s2_forward(f, L, sampling))(t_t)
-
-        vort_t = enforce_triangular_truncation(vort_t, L, T)
-        div_t = enforce_triangular_truncation(div_t, L, T)
-        temp_t = enforce_triangular_truncation(temp_t, L, T)
-
-        return SpectralState(
-            vorticity=spec_state.vorticity + dt * vort_t,
-            divergence=spec_state.divergence + dt * div_t,
-            temperature=spec_state.temperature + dt * temp_t,
-            log_surface_pressure=spec_state.log_surface_pressure,
-            tracers=spec_state.tracers,
+        raw_diag, raw_new = self.array_call(
+            raw_state, timestep, prognostic_tendencies=tendencies
         )
 
-    def array_call(self, state, timestep):
+        new_state = self._tracer_packer.unpack(raw_new.pop("tracers"), state)
+        new_state.update(
+            restore_data_arrays_with_properties(
+                raw_new, self.output_properties, state, self.input_properties,
+                ignore_missing=True,
+            )
+        )
+        diagnostics.update(
+            restore_data_arrays_with_properties(
+                raw_diag, self.diagnostic_properties, state, self.input_properties,
+                ignore_missing=True,
+            )
+        )
+        for key in state.keys():
+            if key not in new_state:
+                new_state[key] = state[key]
+        return diagnostics, new_state
+
+    def array_call(self, state, timestep, prognostic_tendencies=None):
+        prognostic_tendencies = prognostic_tendencies or {}
         u = jnp.array(state["eastward_wind"])
         v = jnp.array(state["northward_wind"])
         temp = jnp.array(state["air_temperature"])
         ps = jnp.array(state["surface_air_pressure"])
-        q = jnp.array(state["specific_humidity"])
+        # specific_humidity is always tracer index 0 (prepend_tracers puts it
+        # first; see TracerPacker.tracer_names).
+        q = jnp.array(state["tracers"][0])
         phis = jnp.array(state["surface_geopotential"])
 
         ak_jnp = jnp.array(state["a_coord"])
@@ -245,7 +358,11 @@ class GFSDynamicsJAX(Stepper):
                 vorticity=jnp.zeros_like(u),
                 divergence=jnp.zeros_like(u),
                 log_surface_pressure=jnp.log(ps),
-                tracers=jnp.stack([q], axis=0),
+                # Carry ALL packed tracers (specific_humidity is index 0 via
+                # prepend_tracers; any additionally registered tracers follow).
+                # Using only [q] here silently dropped extra tracers, breaking
+                # the pack/unpack round-trip for n_tracers > 1.
+                tracers=jnp.asarray(state["tracers"]),
             )
             spec_orig = grid_to_spectral(grid_orig, self.trans_config)
         else:
@@ -278,8 +395,6 @@ class GFSDynamicsJAX(Stepper):
                 self._gauss_weights = jnp.array(raw_weights / 2.0)
 
             if self._pdryini is None:
-                from .jax.dynamics import compute_pressure_diagnostics
-
                 lnps_grid = jnp.log(ps)
                 press_diag_init = compute_pressure_diagnostics(lnps_grid, self.dyn_config)
                 q_init = jnp.array(q)  # (n_lev, n_lat, n_lon)
@@ -292,29 +407,115 @@ class GFSDynamicsJAX(Stepper):
                 pwat_global_init = float(jnp.sum(w * pwat_init) / n_lon)
                 self._pdryini = pmean_init - g * pwat_global_init
 
+        # Build grid-space physics tendencies from component output (bottom-
+        # to-top), applying the virtual-temperature correction so temperature
+        # and moisture tendencies combine consistently — mirrors the Fortran
+        # wrapper's assign_tendencies path.
+        if prognostic_tendencies:
+            def tend_or_zero(name, shape):
+                if name in prognostic_tendencies:
+                    arr = (
+                        prognostic_tendencies[name]
+                        .to_units(self.input_properties[name]["units"] + " s^-1")
+                        .transpose(*self.input_properties[name]["dims"])
+                        .values
+                    )
+                    return jnp.asarray(np.ascontiguousarray(arr))
+                return jnp.zeros(shape)
+
+            u_t = tend_or_zero("eastward_wind", (n_lev, n_lat, n_lon))
+            v_t = tend_or_zero("northward_wind", (n_lev, n_lat, n_lon))
+            t_t = tend_or_zero("air_temperature", (n_lev, n_lat, n_lon))
+            ps_t = tend_or_zero("surface_air_pressure", (n_lat, n_lon))
+            fvirt = self._fvirt()
+            t_virt = temp * (1 + fvirt * q)
+
+            n_tracers = state["tracers"].shape[0]
+            tracer_t = (
+                jnp.stack(
+                    [
+                        tend_or_zero(name, (n_lev, n_lat, n_lon))
+                        for name in self._tracer_packer.tracer_names
+                    ],
+                    axis=0,
+                )
+                if n_tracers
+                else jnp.zeros((0, n_lev, n_lat, n_lon))
+            )
+            q_t = tracer_t[0] if n_tracers else jnp.zeros((n_lev, n_lat, n_lon))
+
+            virtual_temp_tend = t_t * (1 + fvirt * q) + fvirt * t_virt * q_t
+            lnps_tend = ps_t / ps
+
+            self._phys_tendencies = PhysicsTendencies(
+                u=u_t,
+                v=v_t,
+                virtual_temperature=virtual_temp_tend,
+                log_surface_pressure=lnps_tend,
+                tracers=tracer_t,
+            )
+
         # Advance one timestep (dry-mass fixer activated via gauss_weights +
         # pdryini when adiabatic=False, matching Fortran run.f90 lines 349-356).
-        spec_final = self._jit_advance(
-            spec_orig,
-            self._phis_grads,
-            self.dyn_config,
-            self.trans_config,
-            self.stepper_config,
-            self._latitudes,
-            self._gauss_weights,
-            self._pdryini,
-        )
-
         # Time-split physics adjustment (Held-Suarez etc.), matching the
-        # Fortran wrapper's assign_tendencies + run.f90 physics block.
+        # Fortran wrapper's assign_tendencies + run.f90 physics block, is
+        # folded into the same pure-function call when tendencies are set.
         if self._phys_tendencies is not None:
-            spec_final = self._apply_physics_tendencies(spec_final, dt)
-
-        # Cache the spectral state for the next call so we never re-do
-        # grid→spectral (which would accumulate truncation error).
-        self._spec_state = spec_final
+            spec_final = self._jit_advance_t(
+                spec_orig,
+                self._phys_tendencies,
+                self._phis_grads,
+                self.dyn_config,
+                self.trans_config,
+                self.stepper_config,
+                self._latitudes,
+                self._gauss_weights,
+                self._pdryini,
+            )
+        else:
+            spec_final = self._jit_advance(
+                spec_orig,
+                self._phis_grads,
+                self.dyn_config,
+                self.trans_config,
+                self.stepper_config,
+                self._latitudes,
+                self._gauss_weights,
+                self._pdryini,
+            )
 
         grid_final, _ = spectral_to_grid(spec_final, self.trans_config)
+
+        # Post-step moisture clipping (Fortran parity: set_negatives_to_zero on
+        # tracer 0, component.py:502-503). Clipping is a grid-point operation,
+        # so we clip specific humidity in grid space and transform the clipped
+        # field back to spectral, updating the cached state that the next step
+        # advances — so the correction actually feeds forward (matching Fortran,
+        # which re-transforms every step). Only tracer 0 is round-tripped; the
+        # dynamics fields keep their cached spectral values untouched. Inert for
+        # dry runs (q≈0 ⇒ maximum(q,0)≈q), so Held–Suarez is unaffected.
+        if self._zero_negative_moisture:
+            q0_clipped = jnp.maximum(grid_final.tracers[0].real, 0.0)
+            grid_final = grid_final.replace(
+                tracers=grid_final.tracers.at[0].set(q0_clipped)
+            )
+            L = self.trans_config.L
+            sampling = self.trans_config.sampling
+            T = self.trans_config.truncation
+            q0_spec = enforce_triangular_truncation(
+                jax.vmap(lambda f: s2_forward(f, L, sampling))(q0_clipped), L, T
+            )
+            spec_final = spec_final.replace(
+                tracers=spec_final.tracers.at[0].set(q0_spec)
+            )
+
+        # Cache the (possibly moisture-clipped) spectral state for the next
+        # call so we never re-do grid→spectral for the dynamics fields.
+        self._spec_state = spec_final
+
+        pd = compute_pressure_diagnostics(
+            grid_final.log_surface_pressure, self.dyn_config
+        )
 
         def to_numpy(arr):
             if jnp.iscomplexobj(arr):
@@ -327,4 +528,10 @@ class GFSDynamicsJAX(Stepper):
             "northward_wind": to_numpy(grid_final.v),
             "surface_air_pressure": to_numpy(jnp.exp(grid_final.log_surface_pressure)),
             "specific_humidity": to_numpy(grid_final.tracers[0]),
+            "tracers": to_numpy(grid_final.tracers),
+            "air_pressure": to_numpy(pd.prs),
+            # pd.pk is bottom-to-top; climt/component.py convention for
+            # air_pressure_on_interface_levels is top-to-bottom (mirrors the
+            # [::-1] flip in component.py's assign_air_pressure/output path).
+            "air_pressure_on_interface_levels": to_numpy(pd.pk[::-1]),
         }

@@ -58,10 +58,21 @@ sht_lib: $(CLIMT_ARCH)/libshtns_omp.a
 
 # BLAS Configuration
 
+# On Linux/x86_64, pin a baseline microarchitecture. OpenBLAS's host auto-detect
+# can select an AVX512 target (e.g. on modern CI Xeons) whose generic C SIMD
+# kernels then fail to compile under gcc ("AVX512F vector return without AVX512F
+# enabled" -> inlining target-option mismatch). HASWELL (AVX2) builds cleanly and
+# runs on all modern x86_64 (CI runners and clusters). Darwin/arm and Windows
+# keep OpenBLAS auto-detect (empty => default).
+BLAS_TARGET =
+ifeq ($(CLIMT_ARCH),Linux)
+BLAS_TARGET = TARGET=HASWELL
+endif
+
 blas_lib: $(CLIMT_ARCH)/libopenblas.a
 
 $(CLIMT_ARCH)/libopenblas.a:
-	if [ ! -d $(BLAS_DIR) ]; then mkdir $(BLAS_DIR); tar -xvzf $(BLAS_GZ) -C $(BLAS_DIR) --strip-components=1 > log 2>&1; fi; cd $(BLAS_DIR); CFLAGS=$(CLIMT_CFLAGS) make NO_SHARED=1 NO_LAPACK=0 > log 2>&1 ; make PREFIX=$(BASE_DIR) NO_SHARED=1 NO_LAPACK=0 install > log.install.blas 2>&1 ; cp ../lib/libopenblas.a $(LIB_DIR)
+	if [ ! -d $(BLAS_DIR) ]; then mkdir $(BLAS_DIR); tar -xvzf $(BLAS_GZ) -C $(BLAS_DIR) --strip-components=1 > log 2>&1; fi; cd $(BLAS_DIR); if ! { CFLAGS=$(CLIMT_CFLAGS) make $(BLAS_TARGET) NO_SHARED=1 NO_LAPACK=0 > log 2>&1 && make $(BLAS_TARGET) PREFIX=$(BASE_DIR) NO_SHARED=1 NO_LAPACK=0 install > log.install.blas 2>&1; }; then echo '========== OpenBLAS build log =========='; cat log; echo '========== OpenBLAS install log =========='; cat log.install.blas 2>/dev/null; exit 1; fi; cp ../lib/libopenblas.a $(LIB_DIR)
 
 # GFS Configuration
 

@@ -89,3 +89,22 @@ debug_data/
 .DS_Store
 graphify-out/
 gfs_dynamical_core/_lib/shtns-2.7-r557/
+
+# SPPT pipeline generated datasets / trained params (large binaries)
+data/
+*.pkl
+sppt_checkpoints/
+sppt_analysis*/
+examples/stochastic_sppt/figures/_artifacts/
+
+# ...but DO keep committed doc figures (override the global *.png ignore)
+!examples/stochastic_sppt/figures/*.png
+!docs/gfs_jax_manual/figures/*.png
+
+# LaTeX build artifacts (keep the .tex source and the built .pdf)
+*.aux
+*.toc
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
