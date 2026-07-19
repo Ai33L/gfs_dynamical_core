@@ -363,17 +363,35 @@ forward integrations per case, and (ii) storage, $K\times$ the dataset size.
 Contrast this with adding more \emph{cases} (distinct ICs), which samples
 different weather regimes and reduces a different component of the variance, or
 adding more \emph{ensemble members} $M$, which is expensive because it multiplies
-the reverse-mode rollout cost. \textbf{Exercise~\ref{ex:multidraw}} asks you to
-implement multi-draw truth and measure the effect.
+the reverse-mode rollout cost.
+
+\smallskip\noindent
+\textbf{This is now implemented and run.} \code{mode\_a\_dataset\_multidraw}
+(in \code{generate\_data.py}) draws $K$ truth trajectories per case, and
+\code{afcrps\_multidraw} (in \code{metrics.py}) averages the almost-fair CRPS over
+them while sharing the single forecast rollout. A $32\times32$ run
+($N_c{=}32$ cases, $K{=}32$ draws) confirms every prediction above: the residual
+bias vanishes and $\sigma$ settles \emph{on} 0.5 rather than above it
+(\S\ref{sec:multidraw}). \textbf{Exercise~\ref{ex:multidraw}} asks you to
+reproduce the $K$-dependence and time the (cheap) per-step cost.
 \end{qbox}
 
+\paragraph{Storing $K$ draws.} The multi-draw dataset is identical in structure
+but the truth gains a draw axis, \code{truth[field]} of shape
+\code{[N\_c, K, n\_lead, lat, lon]}; the loss then averages the score over the
+$K$ draws of each case.
+
 \begin{keybox}
-\textbf{A known imperfection in Mode~A truth.} The truth generator re-initialises
-the SPPT pattern at each lead boundary rather than carrying it continuously. At
-$\tau=6$\,h with multi-day leads this is numerically inert ($\phi^{n}\!\sim\!10^{-4}$
-between leads --- the pattern has fully decorrelated, so a fresh stationary draw
-is statistically identical to a carried one). It would matter for long $\tau$ or
-sub-daily leads, and is flagged in the log as a follow-up.
+\textbf{A known imperfection in Mode~A truth --- and its fix.} The original
+single-draw truth generator re-initialises the SPPT pattern at each lead boundary
+rather than carrying it continuously. At $\tau=6$\,h with multi-day leads this is
+numerically inert ($\phi^{n}\!\sim\!10^{-4}$ between leads --- the pattern has
+fully decorrelated, so a fresh stationary draw is statistically identical to a
+carried one). It would matter for long $\tau$ or sub-daily leads. The multi-draw
+generator sidesteps it entirely: it produces the $K$ truth trajectories by reusing
+the \emph{same} \code{ensemble\_rollout} as the forecast, which carries the AR(1)
+pattern \emph{continuously} across lead boundaries. So the more careful path is
+also the more correct one.
 \end{keybox}
 
 %==============================================================================
@@ -679,9 +697,12 @@ sample of it \eqref{eq:loss}. Three finite-sample effects act:
   spread --- a small \emph{upward} bias in $\sigma$.
 \end{enumerate}
 Effects 2 and 3 are \emph{sampling} properties, not bugs, and both shrink as
-$N_c$ and the number of truth draws grow (\S\ref{sec:data},
-Exercise~\ref{ex:multidraw}). In our run $\sigma$ plateaus at $\approx 0.508$ ---
-about $2\%$ high --- entirely consistent with this account.
+$N_c$ and the number of truth draws grow (\S\ref{sec:data}). In the single-draw
+run $\sigma$ plateaus at $\approx 0.508$ --- about $2\%$ high --- entirely
+consistent with this account. And when we \emph{grow} both knobs
+($N_c{=}32$, $K{=}32$) the predicted shrinkage is exactly what happens: the upward
+bias disappears and $\sigma$ settles on 0.5 (\S\ref{sec:multidraw}). The best
+confirmation of an error model is to make its error go away on cue.
 
 %==============================================================================
 \section{Experimental protocol}\label{sec:protocol}
@@ -799,6 +820,46 @@ Taken together, Figures~\ref{fig:conv}--\ref{fig:afcrps} confirm milestone~M1 on
 two fronts: the optimiser \emph{recovers} the parameter, and the recovered
 parameter \emph{produces a calibrated ensemble} on independent data.
 
+\clearpage
+\subsection{$K$-draw truth removes the finite-sample bias}\label{sec:multidraw}
+
+The single-draw run of Figure~\ref{fig:conv} leaves $\sigma$ a couple of percent
+high --- the sampling bias of \S\ref{sec:whybias}, effect~3. \S\ref{sec:data}
+predicts that storing $K$ independent truth draws per case and averaging the score
+over them should make that bias shrink towards zero, at no extra
+\emph{per-step} training cost. Figure~\ref{fig:multidraw} tests the prediction
+directly, growing both sampling knobs at once: from $N_c{=}12$, $K{=}1$ to
+$N_c{=}32$, $K{=}32$.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\textwidth]{figures/fig_convergence_multidraw.png}
+\caption{Recovered $\sigma$ versus step, single-draw (red) versus $K$-draw (blue).
+Both start at 0.2 and rise together --- the recovery dynamics are identical until
+the neighbourhood of 0.5. The \emph{single-draw} curve plateaus at a last-ten mean
+of $0.508$ ($\approx 2\%$ high). The \emph{$K$-draw} curve, freed of the
+inflate-to-cover-an-outlier pressure, does not stop there: it overshoots slightly
+to $\approx 0.52$ (Adam momentum, not sampling) and then \emph{relaxes back},
+plateauing at a last-ten mean of $0.483$ --- last-ten and last-twenty means agree
+to $0.001$, the signature of a genuine plateau rather than a still-drifting curve.}
+\label{fig:multidraw}
+\end{figure}
+
+The upward bias is gone. What remains is a small residual on the \emph{low} side
+($\approx 3\%$), which the trajectory itself explains: the correction that pulls
+$\sigma$ down from the $\approx 0.52$ overshoot carries it a hair past 0.5 before
+settling (momentum ringing), on top of the ordinary batch-stochastic wobble --- not
+a new systematic bias. The recovery is exact at T21, where truth and forecast share
+the identical code, so the transform-convention factor \eqref{eq:F0} cancels.
+
+Two lessons for the student. First, this is what it looks like when an error model
+is \emph{right}: \S\ref{sec:whybias} named the single-draw effect and predicted its
+sign and its cure, and growing $K$ made the bias vanish on cue. Second, the
+$K$-draw curve is the more convincing \emph{convergence} evidence: an
+overshoot-and-relax onto a flat plateau is far harder to mistake for luck than a
+monotone climb that merely stops. The run is reproducible with the standalone,
+resumable \code{run\_convergence.py} (\S\ref{sec:repro}).
+
 %==============================================================================
 \section{How the figures were made}\label{sec:repro}
 %==============================================================================
@@ -826,6 +887,14 @@ def _sigma_only(grads):                 # keep only the log_sigma gradient
 \item[\code{plot.py}] is pure \code{numpy}/\code{matplotlib} --- no \code{JAX} ---
   and renders all five PNGs from the two saved artifacts. Separating slow compute
   from fast plotting means a figure can be re-styled in a second.
+\item[\code{run\_convergence.py}] is the standalone, resumable $K$-draw
+  $\sigma$-recovery run behind Figure~\ref{fig:multidraw}. It builds the
+  $32\times32$ multi-draw dataset once (\code{--data-only}), then trains
+  $\sigma$-only with the same checkpoint/budget machinery as \code{run\_sweep.py},
+  printing the settled $\sigma$ (final and last-ten mean) on completion. A config
+  signature stamped into each artifact makes it refuse to silently reuse a dataset
+  or checkpoint built with different flags. \code{plot\_multidraw.py} then renders
+  the figure from the two checkpoints.
 \end{description}
 
 To reproduce from scratch (from the repository root):
@@ -836,6 +905,10 @@ python -m examples.stochastic_sppt.figures.run_calibration --data-only
 python -m examples.stochastic_sppt.figures.run_sweep --target-steps 45 --budget-seconds 520
 python -m examples.stochastic_sppt.figures.run_calibration
 python -m examples.stochastic_sppt.figures.plot
+# K-draw convergence (Fig. multidraw): build the 32x32 dataset, then train:
+python -m examples.stochastic_sppt.figures.run_convergence --data-only
+python -m examples.stochastic_sppt.figures.run_convergence   # re-invoke until DONE
+python -m examples.stochastic_sppt.figures.plot_multidraw
 \end{lstlisting}
 
 %==============================================================================
@@ -853,19 +926,24 @@ python -m examples.stochastic_sppt.figures.plot
   removed if a learned $\sigma$ is to be read as a physical grid-point standard
   deviation across resolutions.
 \item \textbf{The finite-sample bias} in $\sigma$ is understood
-  (\S\ref{sec:whybias}) but not eliminated; multi-draw truth is the remedy.
+  (\S\ref{sec:whybias}) and, with multi-draw truth, demonstrably removed
+  (\S\ref{sec:multidraw}); a small momentum-driven low-side residual remains and
+  would shrink further with a smaller late-stage learning rate.
 \end{itemize}
 
 %==============================================================================
 \section{Exercises}
 %==============================================================================
 \begin{enumerate}
-\item\label{ex:multidraw} \textbf{Multi-draw truth.} Modify \code{generate\_data.py}
-  to store $K$ independent truth draws per case, and average the afCRPS over them
-  in the loss. Measure the recovered $\sigma$ and its scatter as a function of
-  $K\in\{1,2,4,8\}$. Confirm the plateau moves towards 0.5 and quantify the extra
-  data-generation and per-step training cost --- verifying the claim in
-  \S\ref{sec:data} that truth draws are cheap at training time.
+\item\label{ex:multidraw} \textbf{Multi-draw truth.} A reference implementation
+  now exists (\code{mode\_a\_dataset\_multidraw}, \code{afcrps\_multidraw}, and
+  \code{run\_convergence.py}), and \S\ref{sec:multidraw} shows the $K{=}32$ result.
+  Reproduce the \emph{$K$-dependence} it only asserts: sweep $K\in\{1,2,4,8,16,32\}$
+  at fixed $N_c$, plot the last-ten-mean $\sigma$ against $K$, and confirm it
+  approaches 0.5 while the per-step \emph{training} time stays flat (only
+  data-generation time and storage grow with $K$) --- the cheap-at-training claim
+  of \S\ref{sec:data}. Then separate the two knobs: hold $K{=}1$ and grow $N_c$
+  instead. Which reduces the bias faster per unit of stored data?
 \item\label{ex:cv} \textbf{A proper split.} Hold out a third dataset (seed 2) as a
   true test set; use seed 1 only to choose the learning rate and $\alpha$; report
   the final calibration on seed 2. Does the conclusion change?
